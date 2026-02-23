@@ -1,0 +1,200 @@
+# ============================================================================
+# GitHub Actions Workflow: Azure User Sandbox Provisioning
+# ============================================================================
+# Triggers:
+#   - Manual dispatch (workflow_dispatch) with parameters
+#   - Push to main when input files change
+#   - Pull request (what-if validation only)
+# ============================================================================
+
+name: Provision Azure User Environments
+
+on:
+  workflow_dispatch:
+    inputs:
+      input_file:
+        description: 'Input file path (relative to repo root)'
+        required: true
+        default: 'input/users.csv'
+        type: string
+      location:
+        description: 'Azure region'
+        required: true
+        default: 'swedencentral'
+        type: choice
+        options:
+          - swedencentral
+          - eastus
+          - eastus2
+          - westeurope
+          - westus2
+          - uksouth
+      warning_budget:
+        description: 'Warning budget threshold (USD)'
+        required: false
+        default: '15'
+        type: string
+      hard_limit_budget:
+        description: 'Hard limit budget (USD)'
+        required: false
+        default: '20'
+        type: string
+      grace_period_days:
+        description: 'Grace period before deletion (days)'
+        required: false
+        default: '5'
+        type: string
+      dry_run:
+        description: 'Dry run (what-if only)'
+        required: false
+        default: false
+        type: boolean
+
+  push:
+    branches: [main]
+    paths:
+      - 'input/**'
+      - 'infra/**'
+
+  pull_request:
+    branches: [main]
+    paths:
+      - 'input/**'
+      - 'infra/**'
+      - 'scripts/**'
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  # ========================================================================
+  # Validation Job (runs on all triggers)
+  # ========================================================================
+  validate:
+    name: Validate Templates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate Bicep Syntax
+        run: |
+          az bicep build --file infra/main.bicep --stdout > /dev/null
+          echo "✅ Bicep syntax validation passed"
+
+      - name: Validate Input File
+        run: |
+          INPUT_FILE="${{ github.event.inputs.input_file || 'input/users.csv' }}"
+          if [[ ! -f "$INPUT_FILE" ]]; then
+            echo "❌ Input file not found: $INPUT_FILE"
+            exit 1
+          fi
+          echo "✅ Input file exists: $INPUT_FILE"
+
+          # Validate CSV headers if CSV
+          if [[ "$INPUT_FILE" == *.csv ]]; then
+            HEADER=$(head -1 "$INPUT_FILE")
+            if [[ "$HEADER" != *"UserPrincipalName"* ]] || [[ "$HEADER" != *"Email"* ]]; then
+              echo "❌ CSV missing required columns (UserPrincipalName, Email)"
+              exit 1
+            fi
+            USER_COUNT=$(tail -n +2 "$INPUT_FILE" | wc -l)
+            echo "✅ Found $USER_COUNT user(s) in CSV"
+          fi
+
+          # Validate JSON if JSON
+          if [[ "$INPUT_FILE" == *.json ]]; then
+            python3 -c "import json; data=json.load(open('$INPUT_FILE')); print(f'✅ Found {len(data.get(\"users\", data))} user(s) in JSON')"
+          fi
+
+  # ========================================================================
+  # What-If Job (runs on PRs and dry runs)
+  # ========================================================================
+  what-if:
+    name: What-If Preview
+    needs: validate
+    if: github.event_name == 'pull_request' || github.event.inputs.dry_run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup PowerShell
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Run What-If
+        shell: pwsh
+        run: |
+          $inputFile = "${{ github.event.inputs.input_file || 'input/users.csv' }}"
+          $location = "${{ github.event.inputs.location || 'swedencentral' }}"
+
+          ./scripts/Deploy-UserEnvironment.ps1 `
+            -InputFile $inputFile `
+            -Location $location `
+            -WarningBudget ${{ github.event.inputs.warning_budget || '15' }} `
+            -HardLimitBudget ${{ github.event.inputs.hard_limit_budget || '20' }} `
+            -GracePeriodDays ${{ github.event.inputs.grace_period_days || '5' }} `
+            -WhatIf
+
+  # ========================================================================
+  # Deploy Job (runs on push to main or manual dispatch)
+  # ========================================================================
+  deploy:
+    name: Deploy User Environments
+    needs: validate
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'true')
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy
+        shell: pwsh
+        run: |
+          $inputFile = "${{ github.event.inputs.input_file || 'input/users.csv' }}"
+          $location = "${{ github.event.inputs.location || 'swedencentral' }}"
+
+          ./scripts/Deploy-UserEnvironment.ps1 `
+            -InputFile $inputFile `
+            -Location $location `
+            -WarningBudget ${{ github.event.inputs.warning_budget || '15' }} `
+            -HardLimitBudget ${{ github.event.inputs.hard_limit_budget || '20' }} `
+            -GracePeriodDays ${{ github.event.inputs.grace_period_days || '5' }}
+
+      - name: Upload Deployment Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-logs
+          path: logs/
+          retention-days: 30
