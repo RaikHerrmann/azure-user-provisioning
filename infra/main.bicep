@@ -96,6 +96,7 @@ module rbacAssignment 'modules/rbac.bicep' = {
   params: {
     userObjectId: userObjectId
     tenantAdminObjectId: tenantAdminObjectId
+    sandboxContributorRoleId: denyRgPolicy.outputs.sandboxContributorRoleId
   }
 }
 

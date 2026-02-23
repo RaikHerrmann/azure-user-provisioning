@@ -67,16 +67,20 @@ try {
 
     # Check if user already has Reader (enforcement already applied)
     $rgScope = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName"
-    $existingReaderAssignment = Get-AzRoleAssignment -ObjectId $userObjectId `
-        -Scope $rgScope -ErrorAction SilentlyContinue |
-        Where-Object { $_.RoleDefinitionName -eq 'Reader' }
 
-    $existingContributorAssignment = Get-AzRoleAssignment -ObjectId $userObjectId `
-        -Scope $rgScope -ErrorAction SilentlyContinue |
-        Where-Object { $_.RoleDefinitionName -eq 'Contributor' }
+    # Get ALL role assignments for the user (including child-resource scopes like AI Hub)
+    $allUserAssignments = Get-AzRoleAssignment -ObjectId $userObjectId -ErrorAction SilentlyContinue |
+        Where-Object { $_.Scope -like "$rgScope*" }
 
-    if ($existingReaderAssignment -and -not $existingContributorAssignment) {
-        Write-Output "  Enforcement already applied (user has Reader, no Contributor). Skipping."
+    $existingReaderAssignment = $allUserAssignments |
+        Where-Object { $_.RoleDefinitionName -eq 'Reader' -and $_.Scope -eq $rgScope }
+
+    # Any write role (Sandbox Contributor, Azure AI Developer, etc.) at RG or child scope
+    $existingWriteAssignments = $allUserAssignments |
+        Where-Object { $_.RoleDefinitionName -ne 'Reader' }
+
+    if ($existingReaderAssignment -and -not $existingWriteAssignments) {
+        Write-Output "  Enforcement already applied (user has Reader, no write roles). Skipping."
         return
     }
 
@@ -142,27 +146,34 @@ try {
     Write-Output ""
     Write-Output "--- Step 1: Setting user to READ-ONLY ---"
 
-    # Remove Contributor role assignment
-    $contributorAssignments = Get-AzRoleAssignment -ObjectId $userObjectId `
-        -Scope $rgScope -ErrorAction SilentlyContinue |
-        Where-Object { $_.RoleDefinitionName -eq 'Contributor' }
+    # Remove ALL write roles for the user (Sandbox Contributor at RG scope,
+    # Azure AI Developer / Cognitive Services OpenAI User at child scopes, etc.)
+    # Re-fetch in case assignments changed since Step 0
+    $allUserAssignments = Get-AzRoleAssignment -ObjectId $userObjectId -ErrorAction SilentlyContinue |
+        Where-Object { $_.Scope -like "$rgScope*" }
+    $writeAssignments = $allUserAssignments |
+        Where-Object { $_.RoleDefinitionName -ne 'Reader' }
 
-    if ($contributorAssignments) {
-        foreach ($ca in $contributorAssignments) {
-            Remove-AzRoleAssignment -InputObject $ca -ErrorAction Stop
-            Write-Output "  Removed Contributor role from user."
+    if ($writeAssignments) {
+        foreach ($wa in $writeAssignments) {
+            try {
+                Remove-AzRoleAssignment -InputObject $wa -ErrorAction Stop
+                Write-Output "  Removed '$($wa.RoleDefinitionName)' role from user (scope: $($wa.Scope))."
+            }
+            catch {
+                Write-Warning "  Failed to remove '$($wa.RoleDefinitionName)': $_"
+            }
         }
     }
     else {
-        Write-Output "  Contributor role not found (may already be removed)."
+        Write-Output "  No write roles found (may already be removed)."
     }
 
-    # Assign Reader role (idempotent - check first)
-    $readerAssignments = Get-AzRoleAssignment -ObjectId $userObjectId `
-        -Scope $rgScope -ErrorAction SilentlyContinue |
-        Where-Object { $_.RoleDefinitionName -eq 'Reader' }
+    # Assign Reader role at RG scope (idempotent - check first)
+    $readerAssignment = $allUserAssignments |
+        Where-Object { $_.RoleDefinitionName -eq 'Reader' -and $_.Scope -eq $rgScope }
 
-    if (-not $readerAssignments) {
+    if (-not $readerAssignment) {
         New-AzRoleAssignment -ObjectId $userObjectId `
             -RoleDefinitionId $readerRoleId `
             -Scope $rgScope `

@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Tears down all resources for a given user: removes resources, RBAC,
-    custom roles, policies, budgets, and the resource group itself.
+    policies, budgets, and the resource group itself.
 
 .PARAMETER UserPrincipalName
     The UPN of the user whose environment should be removed.
@@ -95,30 +95,43 @@ try {
     Write-Host ""
     Write-Host "  ── Step 1: Cleaning up policies and custom roles ──" -ForegroundColor Yellow
 
-    # Remove policy assignments matching this specific user (filter by name containing the user's sanitized name)
+    # Remove policy assignments matching this specific user
+    # Matching strategy: check description and nonComplianceMessages for the user's RG name
     $policyAssignments = az policy assignment list --subscription $SubscriptionId 2>$null | ConvertFrom-Json
     foreach ($pa in $policyAssignments) {
-        if ($pa.name -match 'rg-naming' -and $pa.description -match [regex]::Escape($userUniquePattern)) {
-            Write-StepInfo "Removing policy assignment: $($pa.name)"
-            az policy assignment delete --name $pa.name --subscription $SubscriptionId 2>$null
+        if ($pa.name -match 'rg-naming') {
+            $isThisUser = $false
+            # Check nonComplianceMessages for this user's RG name
+            if ($pa.nonComplianceMessages) {
+                foreach ($msg in $pa.nonComplianceMessages) {
+                    if ($msg.message -match [regex]::Escape($rgName)) {
+                        $isThisUser = $true
+                        break
+                    }
+                }
+            }
+            # Also check description for RG name
+            if (-not $isThisUser -and $pa.description -and $pa.description -match [regex]::Escape($rgName)) {
+                $isThisUser = $true
+            }
+            if ($isThisUser) {
+                Write-StepInfo "Removing policy assignment: $($pa.name)"
+                az policy assignment delete --name $pa.name --subscription $SubscriptionId 2>$null
+            }
         }
     }
 
     # Remove policy definitions for this specific user
+    # Matching: check description and displayName for the user's RG name
     $policyDefs = az policy definition list --subscription $SubscriptionId --query "[?policyType=='Custom' && contains(name, 'rg-naming-convention')]" 2>$null | ConvertFrom-Json
     foreach ($pd in $policyDefs) {
-        # Check if the policy's non-compliance message references this user's RG
         $isThisUser = $false
-        if ($pd.nonComplianceMessages) {
-            foreach ($msg in $pd.nonComplianceMessages) {
-                if ($msg.message -match [regex]::Escape($rgName)) {
-                    $isThisUser = $true
-                    break
-                }
-            }
+        # Check description for RG name
+        if ($pd.description -and $pd.description -match [regex]::Escape($rgName)) {
+            $isThisUser = $true
         }
-        # Also match by unique suffix in the name
-        if (-not $isThisUser -and $pd.name -match [regex]::Escape($rgName)) {
+        # Also check displayName for RG name
+        if (-not $isThisUser -and $pd.displayName -and $pd.displayName -match [regex]::Escape($rgName)) {
             $isThisUser = $true
         }
         if ($isThisUser) {
@@ -127,7 +140,7 @@ try {
         }
     }
 
-    Write-Success "Policies and custom roles cleaned up"
+    Write-Success "Policies cleaned up"
 
     # ========================================================================
     # Step 2: Remove RBAC at subscription scope for this user
@@ -188,7 +201,6 @@ try {
     Write-Host ""
     Write-Host "  Cleaned up:" -ForegroundColor White
     Write-Host "    • Policy assignments and definitions" -ForegroundColor Gray
-    Write-Host "    • Custom role definitions (Sandbox deny RG)" -ForegroundColor Gray
     Write-Host "    • Subscription-level RBAC assignments" -ForegroundColor Gray
     Write-Host "    • Resource group '$rgName' (deletion in progress)" -ForegroundColor Gray
     Write-Host "    • Deployment history" -ForegroundColor Gray

@@ -1,141 +1,250 @@
 # Admin Connection Guide
 
-This document explains how a tenant administrator should connect to Azure before running the provisioning scripts.
+How to connect to Azure before running the provisioning scripts. This guide assumes you are new to Azure and walks you through each step.
 
 ---
 
 ## Table of Contents
 
-- [Prerequisites](#prerequisites)
-- [Option 1: Interactive Login (Recommended for Manual Runs)](#option-1-interactive-login-recommended-for-manual-runs)
-- [Option 2: Service Principal (Recommended for CI/CD)](#option-2-service-principal-recommended-for-cicd)
-- [Option 3: Managed Identity (Azure-hosted Automation)](#option-3-managed-identity-azure-hosted-automation)
-- [Verifying Your Connection](#verifying-your-connection)
-- [Required Permissions](#required-permissions)
+- [What You Need Before Starting](#what-you-need-before-starting)
+- [Key Azure Concepts](#key-azure-concepts)
+- [Step 1: Install the Tools](#step-1-install-the-tools)
+- [Step 2: Log In to Azure](#step-2-log-in-to-azure)
+- [Step 3: Find and Select Your Subscription](#step-3-find-and-select-your-subscription)
+- [Step 4: Verify Everything Works](#step-4-verify-everything-works)
+- [Advanced: Service Principal for CI/CD](#advanced-service-principal-for-cicd)
+- [Required Permissions (Reference)](#required-permissions-reference)
 - [Troubleshooting](#troubleshooting)
 
 ---
 
-## Prerequisites
+## What You Need Before Starting
 
-| Tool | Install |
-|------|---------|
-| **Azure CLI** ≥ 2.60 | `winget install Microsoft.AzureCLI` or [https://aka.ms/installazurecli](https://aka.ms/installazurecli) |
-| **PowerShell** ≥ 7.4 | `winget install Microsoft.PowerShell` |
-| **Bicep CLI** | Installed automatically with Azure CLI (`az bicep install`) |
+You need **three things** to run this solution:
+
+| What | Why | How to Get It |
+|------|-----|--------------|
+| **Azure Tenant** | Your organization's identity directory | Your IT admin creates this, or use an existing one |
+| **Azure Subscription** | Where resources (and costs) live | Created in Step 1 of the deployment, or use an existing one |
+| **Admin Permissions** | You need Owner or Global Admin access | Ask your IT admin, or if it's your personal tenant, you already have this |
 
 ---
 
-## Option 1: Interactive Login (Recommended for Manual Runs)
+## Key Azure Concepts
 
-Use this when running scripts manually from your workstation.
+If you're new to Azure, here's a quick glossary of terms used in this solution:
 
-### Step 1: Login to Azure
+| Term | What It Means | Analogy |
+|------|--------------|---------|
+| **Tenant** | Your organization's Azure identity directory (Entra ID). Contains all user accounts. | Like your company's employee directory |
+| **Subscription** | A billing container for Azure resources. Think of it as a "cost bucket." | Like a department credit card |
+| **Resource Group** | A folder that contains related Azure resources (VMs, storage, etc.). | Like a project folder on your computer |
+| **RBAC** | Role-Based Access Control — who can do what, and where. | Like file permissions on a shared drive |
+| **Bicep** | Microsoft's language for defining Azure infrastructure as code. Like a blueprint for buildings. | Like a recipe — declares what to create |
+| **Azure CLI** | Command-line tool to manage Azure. You type commands, Azure executes them. | Like a remote control for Azure |
+| **Entra ID** | Microsoft's identity service (formerly Azure AD). Manages user accounts and authentication. | Like Active Directory for the cloud |
+| **Managed Identity** | An automatic identity Azure creates for a resource, so it can authenticate without passwords. | Like a keycard for a robot employee |
 
-```bash
-# Login with a specific tenant
-az login --tenant YOUR_TENANT_ID
+---
 
-# If you have access to multiple tenants, specify the tenant:
-az login --tenant contoso.onmicrosoft.com
-```
+## Step 1: Install the Tools
 
-A browser window opens. Sign in with your **tenant admin** credentials.
+You need three tools installed on your computer. Open a terminal (PowerShell on Windows, Terminal on Mac/Linux) and run these commands:
 
-### Step 2: Select Subscription
+### 1a. Install Azure CLI
 
-```bash
-# List available subscriptions
-az account list --output table
-
-# Set the default subscription (or a "management" subscription)
-az account set --subscription "YOUR_SUBSCRIPTION_ID"
-```
-
-### Step 3: Verify
-
-```bash
-az account show --output table
-```
-
-You should see your admin account and the correct tenant.
-
-### Step 4: Run the Deployment
-
+**Windows** (open PowerShell as Administrator):
 ```powershell
-cd scripts
-pwsh ./Deploy-UserEnvironment.ps1 -InputFile "../input/users.csv" -Location "swedencentral"
+winget install Microsoft.AzureCLI
 ```
 
-> **Note**: The script will automatically resolve your admin identity and use it
-> for the `tenantAdminObjectId` parameter.
+**Mac**:
+```bash
+brew install azure-cli
+```
+
+**Linux**:
+```bash
+curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+```
+
+**Verify it works:**
+```bash
+az version
+```
+You should see a version number like `2.67.0` or higher.
+
+### 1b. Install PowerShell 7
+
+**Windows**:
+```powershell
+winget install Microsoft.PowerShell
+```
+
+**Mac**:
+```bash
+brew install powershell/tap/powershell
+```
+
+**Verify it works:**
+```bash
+pwsh --version
+```
+You should see `PowerShell 7.4` or higher.
+
+### 1c. Install Bicep (Automatic)
+
+Bicep is auto-installed with the Azure CLI. Verify with:
+```bash
+az bicep version
+```
+
+If it's missing, install manually:
+```bash
+az bicep install
+```
 
 ---
 
-## Option 2: Service Principal (Recommended for CI/CD)
+## Step 2: Log In to Azure
 
-Use this for GitHub Actions, Azure DevOps, or other automated pipelines.
+### Find Your Tenant ID
 
-### Step 1: Create a Service Principal
+1. Go to [https://portal.azure.com](https://portal.azure.com)
+2. In the top-right corner, click your profile icon
+3. Click **"Switch directory"**
+4. Your current tenant name and **Tenant ID** (a GUID like `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) are shown
+
+### Log In via Terminal
 
 ```bash
-# Create SP with Owner role at subscription scope
+az login --tenant YOUR_TENANT_ID
+```
+
+> **Replace** `YOUR_TENANT_ID` with the actual ID you found above.
+
+A browser window will open. Sign in with your admin account (the account that has Owner permissions on the tenant).
+
+After signing in, the terminal will show your available subscriptions:
+```
+A]  Subscription 1 (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+B]  Subscription 2 (yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy)
+```
+
+**What if no browser opens?** Use device code login instead:
+```bash
+az login --tenant YOUR_TENANT_ID --use-device-code
+```
+This gives you a code to enter at [https://microsoft.com/devicelogin](https://microsoft.com/devicelogin).
+
+---
+
+## Step 3: Find and Select Your Subscription
+
+After logging in, you need to tell Azure which subscription to use.
+
+### List Your Subscriptions
+
+```bash
+az account list --output table
+```
+
+This shows all subscriptions you have access to:
+```
+Name                    SubscriptionId                        State     IsDefault
+----------------------  ------------------------------------  --------  ---------
+My Subscription         xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx  Enabled   True
+Dev/Test Subscription   yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy  Enabled   False
+```
+
+### Set the Active Subscription
+
+```bash
+az account set --subscription "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+```
+
+> **Replace** the ID with your actual subscription ID from the table above.
+
+### For Testing
+
+If you're *testing* the solution and don't want to create new subscriptions, use your existing subscription:
+1. Copy the subscription ID from the table above
+2. Paste it into the `SubscriptionId` column of your `input/users.csv` file
+
+---
+
+## Step 4: Verify Everything Works
+
+Run these commands one by one to make sure everything is set up correctly:
+
+```bash
+# 1. Check who you're logged in as
+az account show --query "{Name:name, Subscription:id, Tenant:tenantId, User:user.name}" -o table
+```
+**Expected**: You see your admin username, subscription ID, and tenant ID.
+
+```bash
+# 2. Check you can read users from Entra ID
+az ad user list --top 3 --query "[].{UPN:userPrincipalName, Name:displayName}" -o table
+```
+**Expected**: You see a list of users. If you get "Insufficient privileges", see [Troubleshooting](#troubleshooting).
+
+```bash
+# 3. Check Bicep templates compile correctly
+az bicep build --file infra/main.bicep --stdout > $null
+echo "Bicep OK"
+```
+**Expected**: You see "Bicep OK" with no errors.
+
+```bash
+# 4. Check your admin permissions
+az role assignment list --assignee $(az ad signed-in-user show --query id -o tsv) --all --query "[].{Role:roleDefinitionName, Scope:scope}" -o table
+```
+**Expected**: You should see **Owner** or **Contributor + User Access Administrator** at the subscription level.
+
+If all four checks pass, you're ready to run the deployment. See [Sample Walkthrough](sample-walkthrough.md).
+
+---
+
+## Advanced: Service Principal for CI/CD
+
+> **Skip this section** if you're running scripts manually (interactive login above is sufficient).
+
+For automated pipelines (GitHub Actions, Azure DevOps), you need a service principal.
+
+### Create a Service Principal
+
+```bash
 az ad sp create-for-rbac \
   --name "sp-user-provisioning" \
   --role Owner \
   --scopes "/subscriptions/YOUR_SUBSCRIPTION_ID"
 ```
 
-Save the output:
+Save the output — you'll need the `appId`, `password`, and `tenant`:
 ```json
 {
-  "appId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",      ← CLIENT_ID
-  "displayName": "sp-user-provisioning",
-  "password": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",       ← CLIENT_SECRET
-  "tenant": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"        ← TENANT_ID
+  "appId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "password": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "tenant": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 }
 ```
 
-### Step 2: Grant Additional Permissions
-
-The service principal needs these permissions:
+### Grant Microsoft Graph Permissions
 
 ```bash
-SP_OBJECT_ID=$(az ad sp show --id "YOUR_APP_ID" --query id -o tsv)
-
-# User Access Administrator (to manage RBAC)
-az role assignment create \
-  --assignee-object-id $SP_OBJECT_ID \
-  --assignee-principal-type ServicePrincipal \
-  --role "User Access Administrator" \
-  --scope "/subscriptions/YOUR_SUBSCRIPTION_ID"
-
-# Microsoft Graph permissions (to read user identities)
+# Allow the SP to read user identities
 az ad app permission add \
   --id "YOUR_APP_ID" \
   --api 00000003-0000-0000-c000-000000000000 \
   --api-permissions e1fe6dd8-ba31-4d61-89e7-88639da4683d=Role
-# ^ User.Read.All (Application permission)
 
-# Grant admin consent
 az ad app permission admin-consent --id "YOUR_APP_ID"
 ```
 
-### Step 3: Login as Service Principal
+### For GitHub Actions (OIDC — No Secrets)
 
 ```bash
-az login --service-principal \
-  --username "YOUR_APP_ID" \
-  --password "YOUR_CLIENT_SECRET" \
-  --tenant "YOUR_TENANT_ID"
-```
-
-### Step 4: For GitHub Actions (OIDC — Recommended)
-
-Instead of storing secrets, use federated credentials:
-
-```bash
-# Create federated credential for GitHub Actions
 az ad app federated-credential create \
   --id "YOUR_APP_ID" \
   --parameters '{
@@ -146,106 +255,48 @@ az ad app federated-credential create \
   }'
 ```
 
-Then in your GitHub repository secrets:
-- `AZURE_CLIENT_ID` = App (client) ID
-- `AZURE_TENANT_ID` = Directory (tenant) ID
-- `AZURE_SUBSCRIPTION_ID` = Subscription ID
-
-The GitHub Actions workflow uses `azure/login@v2` with OIDC — no secrets stored.
+Add these to your GitHub repository secrets:
+- `AZURE_CLIENT_ID` = appId
+- `AZURE_TENANT_ID` = tenant
+- `AZURE_SUBSCRIPTION_ID` = your subscription ID
 
 ---
 
-## Option 3: Managed Identity (Azure-hosted Automation)
+## Required Permissions (Reference)
 
-If running from an Azure VM, Azure Automation, or Azure Container Instance:
+### For Interactive Login (Manual Runs)
 
-```bash
-# Login with system-assigned managed identity
-az login --identity
-
-# Login with a specific user-assigned managed identity
-az login --identity --username "YOUR_MI_CLIENT_ID"
-```
-
-> **Note**: Ensure the managed identity has the required roles assigned
-> at the subscription scope.
-
----
-
-## Verifying Your Connection
-
-After logging in, run these checks:
-
-```bash
-# 1. Verify identity
-az account show --query "{Name:name, Subscription:id, Tenant:tenantId, User:user.name}" -o table
-
-# 2. Verify admin permissions
-az role assignment list --assignee "YOUR_PRINCIPAL_ID" --all --output table
-
-# 3. Verify Entra ID access (can read users)
-az ad user list --top 5 --query "[].{UPN:userPrincipalName, Name:displayName}" -o table
-
-# 4. Verify Azure CLI and Bicep versions
-az version
-az bicep version
-
-# 5. Test Bicep compilation
-az bicep build --file infra/main.bicep --stdout > /dev/null && echo "Bicep OK"
-```
-
----
-
-## Required Permissions
-
-### For the Admin (Interactive Login)
-
-| Permission | Why |
-|------------|-----|
+| Permission | Why You Need It |
+|------------|----------------|
 | **Subscription Owner** | Create resource groups, deploy resources, manage RBAC |
-| **User Access Administrator** | Assign roles to users and service principals |
-| **Entra ID User.Read.All** | Resolve user Object IDs from UPNs |
-| **Policy Contributor** | Create and assign Azure Policies |
+| **Entra ID read access** | Resolve user Object IDs from their email addresses (UPNs) |
 
-### For the Service Principal (CI/CD)
+> **How to check**: Run `az role assignment list --assignee $(az ad signed-in-user show --query id -o tsv) --all -o table` and look for "Owner" at the subscription scope.
+
+### For Service Principal (CI/CD)
 
 | Role | Scope | Why |
 |------|-------|-----|
 | **Owner** | Subscription | Full resource + RBAC management |
-| **User Access Administrator** | Subscription | Manage RBAC assignments |
 | **Microsoft Graph: User.Read.All** | Application | Resolve user identities |
-
-### For Custom Role Creation
-
-Custom roles (`Sandbox User - No RG Create`) require `Microsoft.Authorization/roleDefinitions/write`
-at the subscription scope. This is included in **Owner** and **User Access Administrator**.
 
 ---
 
 ## Troubleshooting
 
-### "Insufficient privileges"
+### "Insufficient privileges" when listing users
 
-```bash
-# Check what roles you have
-az role assignment list --assignee $(az ad signed-in-user show --query id -o tsv) --all -o table
-```
+**Problem**: `az ad user list` returns an authorization error.
 
-You need **Owner** or **Contributor + User Access Administrator** at the subscription level.
+**Solution**: Your account needs permission to read Entra ID users. For interactive login, this is usually automatic for admin accounts. If not:
+1. Go to Azure Portal → Microsoft Entra ID → Roles and administrators
+2. Ensure you have "Global Reader" or "User Administrator" role
 
-### "User not found in Entra ID"
+### "Authorization_RequestDenied"
 
-The users in your input file must already exist in the tenant. Either:
-1. Create them manually in the Azure Portal (Entra ID → Users → New user)
-2. Use the optional `New-TenantUsers.ps1` script:
-   ```powershell
-   pwsh ./scripts/New-TenantUsers.ps1 -InputFile "./input/users.csv"
-   ```
+**Problem**: Service principal can't read user data.
 
-### "Authorization_RequestDenied" when reading users
-
-Your account needs Microsoft Graph permissions. For interactive login, this is
-usually automatic. For service principals, run:
+**Solution**:
 ```bash
 az ad app permission add --id YOUR_APP_ID \
   --api 00000003-0000-0000-c000-000000000000 \
@@ -253,18 +304,43 @@ az ad app permission add --id YOUR_APP_ID \
 az ad app permission admin-consent --id YOUR_APP_ID
 ```
 
-### "Multiple tenants" — deploying to wrong tenant
+### "The subscription is not registered to use namespace..."
 
-Always specify the tenant explicitly:
+**Problem**: Resource provider not registered.
+
+**Solution**: The deployment script registers providers automatically. To do it manually:
+```bash
+az provider register --namespace Microsoft.MachineLearningServices
+az provider register --namespace Microsoft.CognitiveServices
+```
+
+### Deploying to the wrong tenant
+
+**Problem**: Resources appear in a different tenant than expected.
+
+**Solution**: Always specify the tenant explicitly:
 ```bash
 az login --tenant YOUR_TENANT_ID
-az account show  # verify before deploying
+az account show  # Verify tenant ID matches
 ```
 
-### "Token expired" during long deployments
+### Token expired during long deployments
 
-Deployments can take 10-20 minutes. If your token expires:
+**Problem**: Authentication token expires during a 10-20 minute deployment.
+
+**Solution**: Re-login and re-run:
 ```bash
-az login --tenant YOUR_TENANT_ID  # re-login
-# Then re-run the deployment script — it's idempotent
+az login --tenant YOUR_TENANT_ID
+# Re-run the deployment script — it is idempotent (safe to re-run)
 ```
+
+### "User not found in Entra ID"
+
+**Problem**: Users in your input file don't exist in the tenant.
+
+**Solution**: Either:
+1. Create users manually in Azure Portal → Microsoft Entra ID → Users → New user
+2. Use the optional `New-TenantUsers.ps1` script:
+   ```powershell
+   pwsh ./scripts/New-TenantUsers.ps1 -InputFile "./input/users.csv"
+   ```

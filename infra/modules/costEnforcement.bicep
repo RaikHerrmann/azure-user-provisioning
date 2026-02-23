@@ -73,12 +73,41 @@ resource automationAccount 'Microsoft.Automation/automationAccounts@2023-11-01' 
 }
 
 // === PowerShell 7.2 Modules (required by runbooks) ===
-// Az.Accounts, Az.Resources, Az.Compute, Az.Websites, Az.Monitor are pre-installed.
-// Az.Functions and Az.MachineLearningServices must be explicitly imported.
+// Only Az.Accounts and Az.Resources are pre-installed in the PS 7.2 runtime.
+// All other Az modules must be explicitly imported.
+resource azComputeModule 'Microsoft.Automation/automationAccounts/powershell72Modules@2023-11-01' = {
+  parent: automationAccount
+  name: 'Az.Compute'
+  properties: {
+    contentLink: {
+      uri: 'https://www.powershellgallery.com/api/v2/package/Az.Compute'
+    }
+  }
+}
+
+resource azWebsitesModule 'Microsoft.Automation/automationAccounts/powershell72Modules@2023-11-01' = {
+  parent: automationAccount
+  name: 'Az.Websites'
+  properties: {
+    contentLink: {
+      uri: 'https://www.powershellgallery.com/api/v2/package/Az.Websites'
+    }
+  }
+}
+
+resource azMonitorModule 'Microsoft.Automation/automationAccounts/powershell72Modules@2023-11-01' = {
+  parent: automationAccount
+  name: 'Az.Monitor'
+  properties: {
+    contentLink: {
+      uri: 'https://www.powershellgallery.com/api/v2/package/Az.Monitor'
+    }
+  }
+}
+
 resource azFunctionsModule 'Microsoft.Automation/automationAccounts/powershell72Modules@2023-11-01' = {
   parent: automationAccount
   name: 'Az.Functions'
-  location: location
   properties: {
     contentLink: {
       uri: 'https://www.powershellgallery.com/api/v2/package/Az.Functions'
@@ -89,7 +118,6 @@ resource azFunctionsModule 'Microsoft.Automation/automationAccounts/powershell72
 resource azMLModule 'Microsoft.Automation/automationAccounts/powershell72Modules@2023-11-01' = {
   parent: automationAccount
   name: 'Az.MachineLearningServices'
-  location: location
   properties: {
     contentLink: {
       uri: 'https://www.powershellgallery.com/api/v2/package/Az.MachineLearningServices'

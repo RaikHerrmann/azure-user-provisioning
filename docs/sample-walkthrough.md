@@ -1,117 +1,171 @@
 # Sample Walkthrough: End-to-End Deployment
 
-This guide walks through a complete deployment scenario step by step.
+This guide walks you through the **complete deployment process** step by step. It is written for administrators who have **beginner-level Azure experience**.
+
+The deployment is split into **two main steps**:
+1. **Step 1**: Create Subscriptions (or skip for testing)
+2. **Step 2**: Deploy Everything Else (user setup, resources, cost management, automation)
 
 ---
 
 ## Scenario
 
-You are the tenant admin for `contoso.com`. You need to provision sandbox
-environments for 2 new AI researchers: Alice and Bob.
+You are the tenant admin for `contoso.com`. You need to provision sandbox environments for 2 AI researchers: **Alice** and **Bob**.
 
 ---
 
-## Step 1: Clone the Repository
+## Before You Begin: Install Tools and Log In
+
+If you haven't done this yet, follow the [Admin Connection Guide](admin-connection-guide.md) to:
+1. Install Azure CLI, PowerShell 7, and Bicep
+2. Log in to Azure
+3. Verify your permissions
+
+```bash
+# Quick check — run these to verify
+az account show --query "{User:user.name, Tenant:tenantId}" -o table
+az ad user list --top 1 -o table
+az bicep version
+```
+
+---
+
+## Prepare the Input File
+
+Clone the repository and edit the input file:
 
 ```bash
 git clone https://github.com/RaikHerrmann/azure-user-provisioning.git
 cd azure-user-provisioning
 ```
 
----
-
-## Step 2: Connect to Azure
-
-```bash
-# Login as tenant admin
-az login --tenant contoso.onmicrosoft.com
-
-# Verify your identity
-az account show --query "{User:user.name, Tenant:tenantId, Sub:id}" -o table
-
-# Set the subscription where user environments will be created
-az account set --subscription "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-```
-
-See [Admin Connection Guide](admin-connection-guide.md) for detailed auth options.
-
----
-
-## Step 3: Prepare the Input File
-
-Edit `input/users.csv`:
+Edit `input/users.csv` with your users:
 
 ```csv
-UserPrincipalName,DisplayName,Email,Department,CostCenter
-alice.researcher@contoso.com,Alice Researcher,alice.researcher@contoso.com,AI Research,CC-2001
-bob.scientist@contoso.com,Bob Scientist,bob.scientist@contoso.com,AI Research,CC-2002
+UserPrincipalName,DisplayName,Email,Department,CostCenter,SubscriptionId
+alice.researcher@contoso.com,Alice Researcher,alice.researcher@contoso.com,AI Research,CC-2001,
+bob.scientist@contoso.com,Bob Scientist,bob.scientist@contoso.com,AI Research,CC-2002,
 ```
 
-> **Important**: Users must already exist in Entra ID. If they don't, use the
-> optional user creation module first (see Step 3b below).
+> **The `SubscriptionId` column is empty** — it will be filled in during Step 1 (or you fill it manually for testing).
 
----
+### Do the users exist in Entra ID?
 
-## Step 3b: (Optional) Create Users in Entra ID
+Check if your users already have accounts:
 
-If Alice and Bob don't have accounts yet:
+```bash
+az ad user show --id alice.researcher@contoso.com --query "{Name:displayName, Id:id}" -o table
+```
+
+**If users do NOT exist yet**, create them first:
 
 ```powershell
 cd scripts
-
-# Preview what would be created (dry run)
-pwsh ./New-TenantUsers.ps1 -InputFile "../input/users.csv" -WhatIf
-
-# Create the users
 pwsh ./New-TenantUsers.ps1 -InputFile "../input/users.csv"
 ```
 
-Output:
-
-```
-  Processing: Alice Researcher (alice.researcher@contoso.com)...
-    Created! ObjectId: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
-  Processing: Bob Scientist (bob.scientist@contoso.com)...
-    Created! ObjectId: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
-
-  Credentials saved to: ../output/new-users-20240115-143022.csv
-
-  ⚠ IMPORTANT: Share passwords with users securely!
-```
-
-Send the temporary passwords to users through a secure channel.
+This creates the accounts and saves temporary passwords to `output/new-users-*.csv`.
 
 ---
 
-## Step 4: Preview the Deployment (What-If)
+## STEP 1: Create Subscriptions
 
-Always preview first:
+> **For testing: SKIP this step.** Add your existing subscription ID to the `SubscriptionId` column in the CSV instead. Jump to [Step 2](#step-2-deploy-everything-else).
+
+### What this step does
+
+Creates one Azure subscription per user, all under the **same billing account**. This ensures centralized billing and cost visibility.
+
+### Find your billing scope
+
+You need your billing scope string. Run these commands to find it:
+
+```bash
+# List billing accounts
+az billing account list --query "[].{Name:name, DisplayName:displayName, Type:agreementType}" -o table
+```
+
+**For Microsoft Customer Agreement (MCA):**
+```bash
+# List billing profiles
+az billing profile list --account-name "YOUR_BILLING_ACCOUNT" -o table
+
+# List invoice sections
+az billing invoice section list --account-name "YOUR_BILLING_ACCOUNT" --profile-name "YOUR_PROFILE" -o table
+```
+
+Your billing scope is:
+```
+/providers/Microsoft.Billing/billingAccounts/ACCOUNT_ID/billingProfiles/PROFILE_ID/invoiceSections/SECTION_ID
+```
+
+**For Enterprise Agreement (EA):**
+```bash
+# The billing scope is:
+/providers/Microsoft.Billing/billingAccounts/ACCOUNT_ID/enrollmentAccounts/ENROLLMENT_ID
+```
+
+### Run subscription creation
 
 ```powershell
 cd scripts
 
-pwsh ./Deploy-UserEnvironment.ps1 `
-  -InputFile "../input/users.csv" `
-  -Location "swedencentral" `
-  -WhatIf
+# Preview first (dry run)
+pwsh ./New-UserSubscriptions.ps1 `
+    -InputFile "../input/users.csv" `
+    -BillingScope "/providers/Microsoft.Billing/billingAccounts/XXXX/billingProfiles/XXXX/invoiceSections/XXXX" `
+    -WhatIf
+
+# Create subscriptions
+pwsh ./New-UserSubscriptions.ps1 `
+    -InputFile "../input/users.csv" `
+    -BillingScope "/providers/Microsoft.Billing/billingAccounts/XXXX/billingProfiles/XXXX/invoiceSections/XXXX"
 ```
 
-This shows what resources would be created without making any changes.
+**What happens:**
+- A subscription named "Sandbox - Alice Researcher" is created under your billing account
+- A subscription named "Sandbox - Bob Scientist" is created under the same billing account
+- An updated input file is saved to `output/users-with-subscriptions-*.csv` with the subscription IDs filled in
+
+**Use the updated file for Step 2:**
+```powershell
+# The script tells you the output file path. Use that for the next step.
+```
 
 ---
 
-## Step 5: Deploy — Step-by-Step Mode (Recommended First Time)
+## STEP 2: Deploy Everything Else
 
-For your first deployment, use `-Step` to pause between phases:
+This is where the actual environment provisioning happens. It deploys **six phases** for each user: prerequisites check, input parsing, identity resolution, provider registration, Bicep deployment, and summary.
+
+### What this step creates (for each user)
+
+| Component | What It Is | Why |
+|-----------|-----------|-----|
+| **Resource Group** | A container for the user's resources (`rg-alice-researcher-contoso-com`) | Isolation boundary |
+| **RBAC Assignment** | Sandbox Contributor role scoped to the RG | User can work inside their RG, but can't escape |
+| **Azure Policy** | Naming convention guardrail (`rg-*`) | Extra safety layer |
+| **AI Foundry Hub + Project** | Azure AI workspace with storage, key vault, monitoring | For AI/ML experiments |
+| **Budget** | Monthly budget ($20) with thresholds at 75%, 90%, and 100% | Cost monitoring |
+| **Action Groups** | Email notifications for warnings and enforcement | Alerts |
+| **Automation Account** | Runbooks that enforce cost limits automatically | Cost enforcement engine |
+| **Webhook** | Connects the budget notification to the automation runbook | Trigger chain |
+| **Daily Schedule** | Backup check at 06:00 UTC every day | Redundant enforcement |
+
+### Option A: Test with a Single User (Recommended First Time)
 
 ```powershell
+cd scripts
+
+# Use the file from Step 1, or your original file with SubscriptionId filled in
 pwsh ./Deploy-UserEnvironment.ps1 `
-  -InputFile "../input/users.csv" `
-  -Location "swedencentral" `
-  -Step
+    -InputFile "../input/users.csv" `
+    -Location "swedencentral" `
+    -SingleUser "alice.researcher@contoso.com" `
+    -Step
 ```
 
-The script will pause after each phase:
+**What `-Step` does:** Pauses after each phase so you can inspect the results:
 
 ```
 ═══════════════════════════════════════════════════════════════
@@ -126,42 +180,113 @@ The script will pause after each phase:
   ✓ Logged in as admin@contoso.com (Tenant: xxxxxxxx)
   → Resolving admin identity...
   ✓ Admin Object ID: 11111111-1111-1111-1111-111111111111
+  → Validating Bicep templates...
+  ✓ Bicep templates valid
 
   Next: Read and validate input file
   Press ENTER to continue, or 'q' to quit:
 ```
 
-Each phase can be inspected before proceeding.
+Press **ENTER** at each pause to continue, or type **q** to stop.
 
----
-
-## Step 5-alt: Deploy — Single User Testing
-
-Test with just one user first:
+### Option B: Preview Without Deploying (What-If)
 
 ```powershell
 pwsh ./Deploy-UserEnvironment.ps1 `
-  -InputFile "../input/users.csv" `
-  -Location "swedencentral" `
-  -SingleUser "alice.researcher@contoso.com" `
-  -Step
+    -InputFile "../input/users.csv" `
+    -Location "swedencentral" `
+    -WhatIf
 ```
 
----
+This shows exactly what *would* be created, without actually creating anything. Great for review.
 
-## Step 5-alt2: Deploy — All Users at Once
-
-Once confident, deploy everything in batch:
+### Option C: Deploy All Users at Once
 
 ```powershell
 pwsh ./Deploy-UserEnvironment.ps1 `
-  -InputFile "../input/users.csv" `
-  -Location "swedencentral"
+    -InputFile "../input/users.csv" `
+    -Location "swedencentral"
 ```
+
+This deploys all users sequentially. Each user takes 5-15 minutes.
 
 ---
 
-## Step 6: Verify the Deployment
+## Understanding Each Phase of Step 2
+
+### Phase 1: Prerequisites
+
+**What it does:** Checks that Azure CLI, Bicep, and authentication are working. Validates the Bicep templates compile correctly.
+
+**What can go wrong:** If you're not logged in, it tells you to run `az login`. If Bicep isn't installed, it auto-installs it.
+
+### Phase 2: Input Parsing
+
+**What it does:** Reads your CSV/JSON file and lists the users to process. If you used `-SingleUser`, it filters to just that one user.
+
+**What can go wrong:** If the file has wrong column names or the user doesn't exist in the file.
+
+### Phase 3: Identity Resolution
+
+**What it does:** For each user in the input file, it looks up their **Object ID** in Entra ID (Azure's identity service). The Object ID is a unique identifier Azure uses internally.
+
+**What can go wrong:** If a user doesn't exist in Entra ID, they're skipped with a warning. Use `New-TenantUsers.ps1` to create missing users.
+
+### Phase 4: Resource Provider Registration
+
+**What it does:** Ensures the required Azure services are enabled for your subscription. Azure has many services (called "resource providers"), and some need to be registered before use.
+
+Examples of providers being registered:
+- `Microsoft.MachineLearningServices` (for AI Foundry)
+- `Microsoft.Automation` (for cost enforcement runbooks)
+- `Microsoft.Consumption` (for budget monitoring)
+
+**What can go wrong:** Usually nothing — this step is automatic. If you lack permissions, the script warns you.
+
+### Phase 5: Bicep Deployment (The Main Event)
+
+**What it does:** For each user, it runs the Bicep template which creates:
+
+1. **Resource Group** (`rg-alice-researcher-contoso-com`)
+   - This is the user's isolated container
+
+2. **RBAC Setup** — assigns two roles:
+   - **Sandbox Contributor** → the user (can create/manage resources, but NOT modify cost controls)
+   - **Owner** → the admin (full control for management)
+
+3. **Azure Policy** — naming convention guardrail at subscription scope
+
+4. **AI Foundry** — Hub + Project + Storage + Key Vault + App Insights + Log Analytics
+
+5. **Cost Management:**
+   - Budget with $15 warning / $20 hard limit
+   - Action Group for email notifications
+
+6. **Automation Account:**
+   - Runbook: `Invoke-CostEnforcement` (changes user to read-only, stops resources)
+   - Runbook: `Invoke-GracePeriodCleanup` (deletes resources after grace period)
+   - Schedule: Daily check at 06:00 UTC (backup enforcement)
+   - Managed Identity with Contributor + User Access Administrator roles
+
+After Bicep deployment, the script:
+- **Uploads the PowerShell runbook code** to the Automation Account
+- **Creates a webhook** so the budget notification can trigger the runbook
+- **Wires the webhook to the Action Group** so the trigger chain is complete
+
+**What can go wrong:**
+- AI Foundry deployment fails → check that your region supports it (try `swedencentral` or `eastus`)
+- RBAC assignment fails → you need Owner permissions
+- Webhook wiring fails → non-fatal, the daily schedule provides backup enforcement
+
+### Phase 6: Summary
+
+**What it does:** Shows a table of results (SUCCESS/FAILED for each user) and saves everything to log files.
+
+---
+
+## Verify the Deployment Worked
+
+After deployment, run these checks:
 
 ### Check Resource Groups
 
@@ -169,133 +294,162 @@ pwsh ./Deploy-UserEnvironment.ps1 `
 az group list --query "[?tags.ManagedBy=='IaC-Automation']" -o table
 ```
 
-Expected output:
-```
-Name                                Location       Status
-----------------------------------  -------------  ---------
-rg-alice-researcher-contoso-com     swedencentral  Succeeded
-rg-bob-scientist-contoso-com        swedencentral  Succeeded
-```
-
-### Check AI Foundry Workspaces
-
-```bash
-az ml workspace list -o table
-```
-
-### Check Budgets
-
-```bash
-az consumption budget list -o table
-```
-
-### Check RBAC
-
-```bash
-# Check Alice's permissions
-az role assignment list \
-  --assignee "alice.researcher@contoso.com" \
-  --all -o table
-```
-
 Expected:
 ```
-Principal                          Role            Scope
----------------------------------  --------------  --------------------------
-alice.researcher@contoso.com       Contributor     rg-alice-researcher-contoso-com
-alice.researcher@contoso.com       AI Developer    aihub-xxxxx
+Name                                  Location       Status
+------------------------------------  -------------  ---------
+rg-alice-researcher-contoso-com       swedencentral  Succeeded
+rg-bob-scientist-contoso-com          swedencentral  Succeeded
 ```
 
-### Check that users CANNOT create resource groups
+### Check Alice's Permissions
 
 ```bash
-# Switch to Alice's context (for testing)
+az role assignment list \
+    --assignee "alice.researcher@contoso.com" \
+    --all \
+    --query "[].{Role:roleDefinitionName, Scope:scope}" -o table
+```
+
+Expected — she has Sandbox Contributor on her RG, AI Developer on her Hub:
+```
+Role                                Scope
+----------------------------------  --------------------------------------------------
+Sandbox Contributor - xxxxx         /subscriptions/.../resourceGroups/rg-alice-...
+Azure AI Developer                  /subscriptions/.../workspaces/aihub-xxxxx
+Cognitive Services OpenAI User      /subscriptions/.../workspaces/aihub-xxxxx
+```
+
+### Verify Alice CANNOT Create Resource Groups
+
+If you can authenticate as Alice (for testing):
+```bash
 az login --username alice.researcher@contoso.com
 
 # This should FAIL:
-az group create --name "rg-test-forbidden" --location swedencentral
-# Error: AuthorizationFailed — The user does not have authorization to perform
-# action 'Microsoft.Resources/subscriptions/resourceGroups/write'
+az group create --name "rg-forbidden-test" --location swedencentral
+# Expected error: The user does not have authorization to perform action
+# 'Microsoft.Resources/subscriptions/resourceGroups/write'
 ```
+
+### Verify Alice CANNOT Delete the Automation Account
+
+```bash
+# As Alice — this should FAIL:
+az automation account delete --resource-group "rg-alice-researcher-contoso-com" --name "aa-cost-XXXXX"
+# Expected error: does not have authorization to perform action
+# 'Microsoft.Automation/automationAccounts/delete'
+```
+
+### Check Budget
+
+```bash
+az consumption budget list \
+    --resource-group "rg-alice-researcher-contoso-com" \
+    --query "[].{Name:name, Amount:amount}" -o table
+```
+
+Expected: Budget with amount 20 (the hard limit).
 
 ---
 
-## Step 7: Monitor Costs
+## What Happens When Costs Exceed the Limit
 
-Check the deployment logs:
+Here's a timeline of what happens automatically:
 
-```bash
-cat logs/deployment-*.log
-cat logs/results-*.csv
+```
+Day 1-10:  Alice deploys models, runs experiments freely
+           (She has Sandbox Contributor — full resource access)
+
+Day 11:    Cost reaches $15 → Alice receives WARNING EMAIL
+           (No action taken, just informational)
+
+Day 13:    Cost reaches $20 → ENFORCEMENT TRIGGERS:
+           ✓ Automation runbook starts
+           ✓ Alice's role: Sandbox Contributor → Reader (read-only)
+           ✓ All VMs, Web Apps, Function Apps: STOPPED
+           ✓ ML inference endpoints: DISABLED
+           ✓ Alice receives enforcement email
+           ✓ 5-day grace period begins
+
+Day 13-18: Alice can VIEW resources but CANNOT modify anything
+           (Reader role is read-only)
+
+Day 18:    Grace period expires → CLEANUP RUNBOOK:
+           ✓ All resources in rg-alice-researcher-contoso-com: DELETED
+           ✓ All RBAC assignments: REMOVED
+           ✓ Alice receives final notification
+
+After:     Admin can re-provision Alice's environment at any time
+           by re-running the deploy script
 ```
 
-Check budget status for a specific user:
+### Daily Backup Check (06:00 UTC)
 
-```bash
-az consumption budget show \
-  --budget-name "budget-XXXXX" \
-  --resource-group "rg-alice-researcher-contoso-com" \
-  --query "{Name:name, Amount:amount, CurrentSpend:currentSpend.amount}"
-```
+Even if the budget notification is delayed or the webhook fails, the daily scheduled runbook queries the Cost Management API directly. If costs exceed the hard limit, enforcement runs automatically. This means enforcement happens within **at most 24 hours** of exceeding the limit.
 
 ---
 
-## Step 8: (Later) Cleanup
+## Customize Budget Thresholds
 
-### Remove a single user
+Deploy with different values:
+
+```powershell
+pwsh ./Deploy-UserEnvironment.ps1 `
+    -InputFile "../input/users.csv" `
+    -Location "westeurope" `
+    -WarningBudget 10 `
+    -HardLimitBudget 15 `
+    -GracePeriodDays 3
+```
+
+This sets:
+- Warning emails at $10
+- Hard enforcement at $15
+- Resources deleted 3 days after enforcement (instead of 5)
+
+---
+
+## Cleanup: Remove a User's Environment
+
+### Remove One User
 
 ```powershell
 pwsh ./scripts/Remove-UserEnvironment.ps1 `
-  -UserPrincipalName "alice.researcher@contoso.com" `
-  -SubscriptionId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    -UserPrincipalName "alice.researcher@contoso.com" `
+    -SubscriptionId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 ```
 
-### Remove all users from the input file
+This removes: policies, RBAC, the resource group (and all resources inside), and deployment history.
+
+### Remove All Users
 
 ```powershell
 $subId = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-$users = Import-Csv "./input/users.csv"
-foreach ($user in $users) {
+Import-Csv "./input/users.csv" | ForEach-Object {
     pwsh ./scripts/Remove-UserEnvironment.ps1 `
-      -UserPrincipalName $user.UserPrincipalName `
-      -SubscriptionId $subId `
-      -Force
+        -UserPrincipalName $_.UserPrincipalName `
+        -SubscriptionId $subId `
+        -Force
 }
 ```
 
 ---
 
-## Custom Budget Thresholds
+## Quick Reference: Testing Without New Subscriptions
 
-Deploy with custom values:
+If you **cannot create new subscriptions** (common for testing), here's the shortcut:
 
-```powershell
-pwsh ./Deploy-UserEnvironment.ps1 `
-  -InputFile "../input/users.csv" `
-  -Location "westeurope" `
-  -WarningBudget 10 `
-  -HardLimitBudget 15 `
-  -GracePeriodDays 3
-```
+1. **Skip Step 1 entirely**
+2. Edit `input/users.csv` and put your existing subscription ID in the `SubscriptionId` column:
+   ```csv
+   UserPrincipalName,DisplayName,Email,Department,CostCenter,SubscriptionId
+   alice.researcher@contoso.com,Alice Researcher,alice.researcher@contoso.com,AI Research,CC-2001,xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+   bob.scientist@contoso.com,Bob Scientist,bob.scientist@contoso.com,AI Research,CC-2002,xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+   ```
+3. Run Step 2 directly:
+   ```powershell
+   pwsh ./scripts/Deploy-UserEnvironment.ps1 -InputFile "../input/users.csv" -SingleUser "alice.researcher@contoso.com" -Step
+   ```
 
----
-
-## What Happens When Costs Exceed $20
-
-```
-Day 1-10:  Alice deploys models, runs experiments
-Day 11:    Cost reaches $15 → Alice receives warning email
-Day 13:    Cost reaches $20 → Automation triggers:
-             ✓ Alice's role changed from Contributor to Reader
-             ✓ All VMs, Web Apps, Function Apps stopped
-             ✓ ML endpoints disabled
-             ✓ Alice receives enforcement email
-             ✓ 5-day grace period starts
-Day 13-18: Alice can view resources (Reader) but cannot modify
-Day 18:    Grace period expires → Cleanup runbook:
-             ✓ All resources in rg-alice-researcher-contoso-com deleted
-             ✓ All RBAC assignments removed
-             ✓ Alice receives final notification
-```
-
-The admin can re-provision Alice's environment at any time by re-running the deploy script.
+This deploys both users into the **same subscription** with separate resource groups. The RBAC scoping still ensures each user can only access their own RG.

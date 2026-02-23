@@ -2,11 +2,14 @@
 // rbac.bicep - Role assignments for user within their resource group
 // ============================================================================
 // Assigns:
-//   - Contributor role to the user (scoped to resource group only)
+//   - Sandbox Contributor role to the user (scoped to resource group only)
+//     This custom role is based on Contributor but additionally blocks
+//     modification of cost enforcement resources (Automation, Budgets, etc.)
 //   - Owner role to tenant admin for management operations
 //
 // Security notes:
-//   - Contributor at RG scope does NOT allow creating resource groups
+//   - Sandbox Contributor at RG scope does NOT allow creating resource groups
+//   - The role's notActions prevent tampering with cost management
 //   - Azure Policy at subscription scope provides an additional guardrail
 //   - The tenant admin keeps Owner for administrative overrides
 // ============================================================================
@@ -18,29 +21,30 @@ param userObjectId string
 @description('Object ID of the tenant admin')
 param tenantAdminObjectId string
 
+@description('Full resource ID of the Sandbox Contributor custom role definition')
+param sandboxContributorRoleId string
+
 // === Variables ===
-// Built-in role definition IDs
-var contributorRoleId = 'b24988ac-6180-42a0-ab88-20f7382dd24c'
 var ownerRoleId = '8e3af657-a8ff-443c-a75c-2fe8c4bcb635'
 
 // === Role Assignments ===
 
-// User gets Contributor ONLY on the resource group (not subscription)
+// User gets Sandbox Contributor ONLY on the resource group (not subscription)
 // This means the user can:
 //   - Create, manage, delete resources WITHIN this RG
-//   - Read resource configurations
+//   - Use AI Foundry, compute, storage, etc.
 // The user CANNOT:
-//   - Create new resource groups
+//   - Create new resource groups (no subscription-level permissions)
 //   - Access other resource groups
-//   - Modify subscription-level settings
+//   - Modify or delete the Automation Account, Budgets, or Action Groups
 //   - Manage RBAC assignments (that requires Owner or User Access Administrator)
-resource userContributorAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(resourceGroup().id, userObjectId, contributorRoleId)
+resource userSandboxAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(resourceGroup().id, userObjectId, 'SandboxContributor')
   properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', contributorRoleId)
+    roleDefinitionId: sandboxContributorRoleId
     principalId: userObjectId
     principalType: 'User'
-    description: 'Contributor access for user sandbox environment - scoped to this RG only'
+    description: 'Sandbox Contributor access for user sandbox environment - scoped to this RG only'
   }
 }
 
@@ -56,5 +60,5 @@ resource adminOwnerAssignment 'Microsoft.Authorization/roleAssignments@2022-04-0
 }
 
 // === Outputs ===
-output contributorAssignmentId string = userContributorAssignment.id
+output sandboxAssignmentId string = userSandboxAssignment.id
 output adminOwnerAssignmentId string = adminOwnerAssignment.id

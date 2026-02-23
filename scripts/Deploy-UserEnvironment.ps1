@@ -485,7 +485,7 @@ try {
                 $token = (az account get-access-token --query accessToken -o tsv)
 
                 # Create webhook via REST API (no CLI command exists for this)
-                $webhookUri = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$rgName/providers/Microsoft.Automation/automationAccounts/$aaName/webhooks/${webhookName}?api-version=2015-10-31"
+                $webhookUri = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$rgName/providers/Microsoft.Automation/automationAccounts/$aaName/webhooks/${webhookName}?api-version=2023-11-01"
                 $webhookBody = @{
                     name = $webhookName
                     properties = @{

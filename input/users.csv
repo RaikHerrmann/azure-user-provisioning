@@ -1,4 +1,4 @@
-UserPrincipalName,DisplayName,Email,Department,CostCenter
-john.doe@contoso.com,John Doe,john.doe@contoso.com,Engineering,CC-1001
-jane.smith@contoso.com,Jane Smith,jane.smith@contoso.com,Data Science,CC-1002
-bob.wilson@contoso.com,Bob Wilson,bob.wilson@contoso.com,Research,CC-1003
+UserPrincipalName,DisplayName,Email,Department,CostCenter,SubscriptionId
+john.doe@contoso.com,John Doe,john.doe@contoso.com,Engineering,CC-1001,
+jane.smith@contoso.com,Jane Smith,jane.smith@contoso.com,Data Science,CC-1002,
+bob.wilson@contoso.com,Bob Wilson,bob.wilson@contoso.com,Research,CC-1003,
