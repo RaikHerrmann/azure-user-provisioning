@@ -4,15 +4,17 @@
 
 .DESCRIPTION
     This runbook is scheduled to run N days after cost enforcement is triggered.
-    It performs the following actions:
-      1. Sends a final warning email to the user
-      2. Deletes all resources within the resource group
-      3. Optionally deletes the resource group itself
-      4. Logs all actions for audit
+    It performs:
+      1. Inventories all resources (for audit log)
+      2. Deletes all resources within the resource group in dependency order
+      3. Removes user RBAC assignments
+      4. Logs all actions
 
 .NOTES
     Runs under the Automation Account's System-Assigned Managed Identity.
-    All configuration is read from Automation Account variables.
+    The Automation Account itself is skipped during deletion so the job
+    can complete. The tenant admin should run Remove-UserEnvironment.ps1
+    for full teardown including the Automation Account.
 #>
 
 #Requires -Modules Az.Accounts, Az.Resources
@@ -50,21 +52,13 @@ try {
     Set-AzContext -SubscriptionId $subscriptionId -ErrorAction Stop
 
     # ============================================================================
-    # Step 1: Verify grace period has elapsed
+    # Step 1: Inventory resources before deletion (for audit log)
     # ============================================================================
     Write-Output ""
-    Write-Output "--- Step 1: Verifying grace period ---"
-    Write-Output "  Grace period of $gracePeriodDays days has elapsed."
-    Write-Output "  Proceeding with resource cleanup."
-
-    # ============================================================================
-    # Step 2: Inventory resources before deletion (for audit log)
-    # ============================================================================
-    Write-Output ""
-    Write-Output "--- Step 2: Inventorying resources ---"
+    Write-Output "--- Step 1: Inventorying resources ---"
 
     $resources = Get-AzResource -ResourceGroupName $resourceGroupName -ErrorAction SilentlyContinue
-    
+
     if ($resources) {
         Write-Output "  Found $($resources.Count) resources to delete:"
         foreach ($resource in $resources) {
@@ -73,40 +67,49 @@ try {
     }
     else {
         Write-Output "  No resources found in resource group."
+        Write-Output "  Cleanup complete (nothing to delete)."
+        return
     }
 
     # ============================================================================
-    # Step 3: Delete all resources in the resource group
+    # Step 2: Delete all resources in the resource group
     # ============================================================================
     Write-Output ""
-    Write-Output "--- Step 3: Deleting all resources ---"
+    Write-Output "--- Step 2: Deleting all resources ---"
 
-    # Remove resources in reverse dependency order
-    # First: Compute resources (VMs, containers, etc.)
-    # Then: Networking resources
-    # Then: Storage and data resources
-    # Finally: Everything else
-
+    # Define deletion order (reverse dependency)
     $deleteOrder = @(
-        'Microsoft.Compute/*',
-        'Microsoft.ContainerInstance/*',
-        'Microsoft.Web/*',
-        'Microsoft.MachineLearningServices/workspaces',
-        'Microsoft.CognitiveServices/*',
-        'Microsoft.Network/*',
-        'Microsoft.Insights/*',
-        'Microsoft.OperationalInsights/*',
-        'Microsoft.Storage/*',
+        'Microsoft.Compute/*'
+        'Microsoft.ContainerInstance/*'
+        'Microsoft.Web/*'
+        'Microsoft.MachineLearningServices/*'
+        'Microsoft.CognitiveServices/*'
+        'Microsoft.Network/*'
+        'Microsoft.Insights/*'
+        'Microsoft.OperationalInsights/*'
+        'Microsoft.Storage/*'
         'Microsoft.KeyVault/*'
+        'Microsoft.Consumption/*'
     )
 
-    # Delete resources that match known types first
+    # Track what we've deleted to avoid double-processing
+    $deletedIds = @{}
+
+    # Delete resources matching known types first (in order)
     foreach ($typePattern in $deleteOrder) {
-        $matchingResources = $resources | Where-Object { $_.ResourceType -like $typePattern }
+        $matchingResources = $resources | Where-Object {
+            $_.ResourceType -like $typePattern -and -not $deletedIds.ContainsKey($_.ResourceId)
+        }
         foreach ($resource in $matchingResources) {
+            # Skip the automation account itself
+            if ($resource.ResourceType -eq 'Microsoft.Automation/automationAccounts') {
+                Write-Output "  Skipping Automation Account (self): $($resource.Name)"
+                continue
+            }
             Write-Output "  Deleting: $($resource.ResourceType) / $($resource.Name)..."
             try {
-                Remove-AzResource -ResourceId $resource.ResourceId -Force -ErrorAction Continue
+                Remove-AzResource -ResourceId $resource.ResourceId -Force -ErrorAction Stop
+                $deletedIds[$resource.ResourceId] = $true
                 Write-Output "    Deleted successfully."
             }
             catch {
@@ -118,9 +121,10 @@ try {
     # Delete any remaining resources
     $remainingResources = Get-AzResource -ResourceGroupName $resourceGroupName -ErrorAction SilentlyContinue
     foreach ($resource in $remainingResources) {
-        # Skip the automation account itself (we need it to finish)
         if ($resource.ResourceType -eq 'Microsoft.Automation/automationAccounts') {
-            Write-Output "  Skipping Automation Account (self): $($resource.Name)"
+            continue
+        }
+        if ($deletedIds.ContainsKey($resource.ResourceId)) {
             continue
         }
         Write-Output "  Deleting remaining: $($resource.ResourceType) / $($resource.Name)..."
@@ -133,14 +137,14 @@ try {
     }
 
     # ============================================================================
-    # Step 4: Remove user RBAC assignments
+    # Step 3: Remove user RBAC assignments
     # ============================================================================
     Write-Output ""
-    Write-Output "--- Step 4: Removing user RBAC ---"
+    Write-Output "--- Step 3: Removing user RBAC ---"
 
+    $rgScope = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName"
     $roleAssignments = Get-AzRoleAssignment -ObjectId $userObjectId `
-        -Scope "/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName" `
-        -ErrorAction SilentlyContinue
+        -Scope $rgScope -ErrorAction SilentlyContinue
 
     foreach ($assignment in $roleAssignments) {
         Write-Output "  Removing role: $($assignment.RoleDefinitionName)..."
@@ -157,11 +161,10 @@ try {
     Write-Output "Actions taken:"
     Write-Output "  [x] All resources in '$resourceGroupName' deleted"
     Write-Output "  [x] User RBAC assignments removed"
-    Write-Output "  [x] User $userDisplayName ($userEmail) has been notified"
+    Write-Output "  [x] User $userDisplayName ($userEmail) notified (via Action Group)"
     Write-Output ""
-    Write-Output "NOTE: The resource group shell and Automation Account remain"
-    Write-Output "      for audit purposes. Run the admin cleanup script to"
-    Write-Output "      fully remove the resource group if needed."
+    Write-Output "NOTE: The Automation Account remains for audit."
+    Write-Output "      Run Remove-UserEnvironment.ps1 for full teardown."
 }
 catch {
     Write-Error "Grace period cleanup failed: $_"

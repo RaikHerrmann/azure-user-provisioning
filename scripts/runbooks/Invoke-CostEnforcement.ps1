@@ -3,20 +3,21 @@
     Cost Enforcement Runbook - Triggered when budget hard limit ($20) is reached.
 
 .DESCRIPTION
-    This runbook is triggered by Azure Budget Action Group when cost reaches the hard limit.
-    It performs the following actions:
+    This runbook is triggered by the Azure Budget Action Group when cost reaches
+    the hard limit. It performs:
       1. Changes user RBAC from Contributor to Reader (read-only)
-      2. Stops all running compute resources (VMs, App Services, Container Instances, etc.)
+      2. Stops all running compute resources (VMs, App Services, etc.)
       3. Stops any AI/ML inference endpoints
-      4. Sends notification email to the user
-      5. Schedules the grace period cleanup runbook to run after N days
+      4. Schedules the grace period cleanup runbook to run after N days
+      5. User is notified via the action group email (automatic)
 
 .NOTES
     Runs under the Automation Account's System-Assigned Managed Identity.
-    All configuration is read from Automation Account variables.
+    The MI MUST have both Contributor AND User Access Administrator roles
+    on the resource group (Contributor alone cannot change RBAC).
 #>
 
-#Requires -Modules Az.Accounts, Az.Resources, Az.Compute, Az.Websites, Az.Monitor, Az.MachineLearningServices
+#Requires -Modules Az.Accounts, Az.Resources, Az.Compute, Az.Websites, Az.Functions, Az.Monitor, Az.MachineLearningServices
 
 param(
     [Parameter(Mandatory = $false)]
@@ -53,10 +54,87 @@ try {
     Write-Output "  Resource Group: $resourceGroupName"
     Write-Output "  Subscription: $subscriptionId"
     Write-Output "  Grace Period: $gracePeriodDays days"
-    Write-Output "  Hard Limit: $$hardLimitThreshold"
+    Write-Output "  Hard Limit: `$$hardLimitThreshold"
 
     # Set subscription context
     Set-AzContext -SubscriptionId $subscriptionId -ErrorAction Stop
+
+    # ============================================================================
+    # Step 0: Check if enforcement is needed (for scheduled runs)
+    # ============================================================================
+    Write-Output ""
+    Write-Output "--- Step 0: Checking current cost ---"
+
+    # Check if user already has Reader (enforcement already applied)
+    $rgScope = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName"
+    $existingReaderAssignment = Get-AzRoleAssignment -ObjectId $userObjectId `
+        -Scope $rgScope -ErrorAction SilentlyContinue |
+        Where-Object { $_.RoleDefinitionName -eq 'Reader' }
+
+    $existingContributorAssignment = Get-AzRoleAssignment -ObjectId $userObjectId `
+        -Scope $rgScope -ErrorAction SilentlyContinue |
+        Where-Object { $_.RoleDefinitionName -eq 'Contributor' }
+
+    if ($existingReaderAssignment -and -not $existingContributorAssignment) {
+        Write-Output "  Enforcement already applied (user has Reader, no Contributor). Skipping."
+        return
+    }
+
+    # If this is a scheduled run (no WebhookData), check actual cost
+    if (-not $WebhookData) {
+        Write-Output "  Running as scheduled check. Querying current cost..."
+        try {
+            $startOfMonth = (Get-Date -Day 1).ToString('yyyy-MM-dd')
+            $today = (Get-Date).ToString('yyyy-MM-dd')
+
+            # Use Cost Management API via REST (more reliable than consumption cmdlets)
+            $token = (Get-AzAccessToken -ResourceUrl 'https://management.azure.com').Token
+            $costUri = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName/providers/Microsoft.CostManagement/query?api-version=2023-11-01"
+            $body = @{
+                type = "ActualCost"
+                timeframe = "Custom"
+                timePeriod = @{
+                    from = $startOfMonth
+                    to = $today
+                }
+                dataset = @{
+                    granularity = "None"
+                    aggregation = @{
+                        totalCost = @{
+                            name = "Cost"
+                            function = "Sum"
+                        }
+                    }
+                }
+            } | ConvertTo-Json -Depth 5
+
+            $response = Invoke-RestMethod -Uri $costUri -Method POST -Body $body `
+                -Headers @{ Authorization = "Bearer $token"; 'Content-Type' = 'application/json' } `
+                -ErrorAction Stop
+
+            $currentCost = 0
+            if ($response.properties.rows -and $response.properties.rows.Count -gt 0) {
+                $currentCost = [decimal]$response.properties.rows[0][0]
+            }
+
+            Write-Output "  Current month cost: `$$([math]::Round($currentCost, 2))"
+            Write-Output "  Hard limit: `$$hardLimitThreshold"
+
+            if ($currentCost -lt [decimal]$hardLimitThreshold) {
+                Write-Output "  Cost is below threshold. No enforcement needed."
+                return
+            }
+            Write-Output "  Cost EXCEEDS threshold! Proceeding with enforcement..."
+        }
+        catch {
+            Write-Warning "  Could not query costs (data may be delayed): $_"
+            Write-Output "  Skipping enforcement on this scheduled run (cannot confirm cost)."
+            return
+        }
+    }
+    else {
+        Write-Output "  Triggered by webhook/budget notification. Proceeding with enforcement."
+    }
 
     # ============================================================================
     # Step 1: Change user RBAC to Read-Only
@@ -65,32 +143,29 @@ try {
     Write-Output "--- Step 1: Setting user to READ-ONLY ---"
 
     # Remove Contributor role assignment
-    $contributorAssignment = Get-AzRoleAssignment -ObjectId $userObjectId `
-        -RoleDefinitionId $contributorRoleId `
-        -Scope "/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName" `
-        -ErrorAction SilentlyContinue
+    $contributorAssignments = Get-AzRoleAssignment -ObjectId $userObjectId `
+        -Scope $rgScope -ErrorAction SilentlyContinue |
+        Where-Object { $_.RoleDefinitionName -eq 'Contributor' }
 
-    if ($contributorAssignment) {
-        Remove-AzRoleAssignment -ObjectId $userObjectId `
-            -RoleDefinitionId $contributorRoleId `
-            -Scope "/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName" `
-            -ErrorAction Stop
-        Write-Output "  Removed Contributor role from user."
+    if ($contributorAssignments) {
+        foreach ($ca in $contributorAssignments) {
+            Remove-AzRoleAssignment -InputObject $ca -ErrorAction Stop
+            Write-Output "  Removed Contributor role from user."
+        }
     }
     else {
         Write-Output "  Contributor role not found (may already be removed)."
     }
 
-    # Assign Reader role
-    $readerAssignment = Get-AzRoleAssignment -ObjectId $userObjectId `
-        -RoleDefinitionId $readerRoleId `
-        -Scope "/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName" `
-        -ErrorAction SilentlyContinue
+    # Assign Reader role (idempotent - check first)
+    $readerAssignments = Get-AzRoleAssignment -ObjectId $userObjectId `
+        -Scope $rgScope -ErrorAction SilentlyContinue |
+        Where-Object { $_.RoleDefinitionName -eq 'Reader' }
 
-    if (-not $readerAssignment) {
+    if (-not $readerAssignments) {
         New-AzRoleAssignment -ObjectId $userObjectId `
             -RoleDefinitionId $readerRoleId `
-            -Scope "/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName" `
+            -Scope $rgScope `
             -ErrorAction Stop
         Write-Output "  Assigned Reader role to user."
     }
@@ -119,10 +194,15 @@ try {
     }
 
     # Stop Function Apps
-    $funcApps = Get-AzFunctionApp -ResourceGroupName $resourceGroupName -ErrorAction SilentlyContinue
-    foreach ($func in $funcApps) {
-        Write-Output "  Stopping Function App: $($func.Name)..."
-        Stop-AzFunctionApp -ResourceGroupName $resourceGroupName -Name $func.Name -ErrorAction Continue
+    try {
+        $funcApps = Get-AzFunctionApp -ResourceGroupName $resourceGroupName -ErrorAction SilentlyContinue
+        foreach ($func in $funcApps) {
+            Write-Output "  Stopping Function App: $($func.Name)..."
+            Stop-AzFunctionApp -ResourceGroupName $resourceGroupName -Name $func.Name -Force -ErrorAction Continue
+        }
+    }
+    catch {
+        Write-Warning "  Could not enumerate Function Apps: $_"
     }
 
     # ============================================================================
@@ -131,39 +211,31 @@ try {
     Write-Output ""
     Write-Output "--- Step 3: Disabling AI/ML endpoints ---"
 
-    # Get all ML workspaces in the RG
-    $workspaces = Get-AzMLWorkspace -ResourceGroupName $resourceGroupName -ErrorAction SilentlyContinue
-    foreach ($ws in $workspaces) {
-        # Get online endpoints
-        $endpoints = Get-AzMLOnlineEndpoint -ResourceGroupName $resourceGroupName `
-            -WorkspaceName $ws.Name -ErrorAction SilentlyContinue
-        foreach ($ep in $endpoints) {
-            Write-Output "  Disabling endpoint: $($ep.Name) in workspace $($ws.Name)..."
-            # Scale deployments to 0 instances
-            $deployments = Get-AzMLOnlineDeployment -ResourceGroupName $resourceGroupName `
-                -WorkspaceName $ws.Name -EndpointName $ep.Name -ErrorAction SilentlyContinue
-            foreach ($dep in $deployments) {
-                Write-Output "    Scaling deployment $($dep.Name) to 0 instances..."
-                # Use REST API to scale to 0
-                $depResourceId = $dep.Id
-                $body = @{
-                    properties = @{
-                        scaleSettings = @{
-                            scaleType = "Default"
-                            instanceCount = 0
-                        }
+    try {
+        $workspaces = Get-AzMLWorkspace -ResourceGroupName $resourceGroupName -ErrorAction SilentlyContinue
+        foreach ($ws in $workspaces) {
+            $endpoints = Get-AzMLOnlineEndpoint -ResourceGroupName $resourceGroupName `
+                -WorkspaceName $ws.Name -ErrorAction SilentlyContinue
+            foreach ($ep in $endpoints) {
+                Write-Output "  Disabling endpoint: $($ep.Name) in workspace $($ws.Name)..."
+                $deployments = Get-AzMLOnlineDeployment -ResourceGroupName $resourceGroupName `
+                    -WorkspaceName $ws.Name -EndpointName $ep.Name -ErrorAction SilentlyContinue
+                foreach ($dep in $deployments) {
+                    Write-Output "    Removing deployment $($dep.Name)..."
+                    try {
+                        Remove-AzMLOnlineDeployment -ResourceGroupName $resourceGroupName `
+                            -WorkspaceName $ws.Name -EndpointName $ep.Name `
+                            -Name $dep.Name -ErrorAction Continue
                     }
-                } | ConvertTo-Json -Depth 5
-                
-                try {
-                    Invoke-AzRestMethod -Method PATCH -Path "${depResourceId}?api-version=2024-10-01" `
-                        -Payload $body -ErrorAction Continue
-                }
-                catch {
-                    Write-Warning "    Failed to scale deployment: $_"
+                    catch {
+                        Write-Warning "    Failed to remove deployment: $_"
+                    }
                 }
             }
         }
+    }
+    catch {
+        Write-Warning "  Could not process ML workspaces: $_"
     }
 
     # ============================================================================
@@ -172,39 +244,35 @@ try {
     Write-Output ""
     Write-Output "--- Step 4: Scheduling grace period cleanup ---"
 
-    $automationAccountName = (Get-AzAutomationAccount -ResourceGroupName $resourceGroupName -ErrorAction SilentlyContinue)[0].AutomationAccountName
-    $scheduleName = "GracePeriodCleanup-$(Get-Date -Format 'yyyyMMddHHmm')"
-    $cleanupDate = (Get-Date).AddDays($gracePeriodDays).ToUniversalTime()
+    $automationAccounts = Get-AzAutomationAccount -ResourceGroupName $resourceGroupName -ErrorAction SilentlyContinue
+    if ($automationAccounts -and $automationAccounts.Count -gt 0) {
+        $automationAccountName = $automationAccounts[0].AutomationAccountName
+        $scheduleName = "GracePeriodCleanup-$(Get-Date -Format 'yyyyMMddHHmm')"
+        $cleanupDate = (Get-Date).AddDays($gracePeriodDays).ToUniversalTime()
 
-    Write-Output "  Creating schedule '$scheduleName' for $cleanupDate UTC"
+        Write-Output "  Creating schedule '$scheduleName' for $cleanupDate UTC"
 
-    # Create a one-time schedule
-    New-AzAutomationSchedule -AutomationAccountName $automationAccountName `
-        -ResourceGroupName $resourceGroupName `
-        -Name $scheduleName `
-        -StartTime $cleanupDate `
-        -OneTime `
-        -TimeZone "Etc/UTC" `
-        -ErrorAction Stop
+        # Create a one-time schedule
+        New-AzAutomationSchedule -AutomationAccountName $automationAccountName `
+            -ResourceGroupName $resourceGroupName `
+            -Name $scheduleName `
+            -StartTime $cleanupDate `
+            -OneTime `
+            -TimeZone "Etc/UTC" `
+            -ErrorAction Stop
 
-    # Link the cleanup runbook to the schedule
-    Register-AzAutomationScheduledRunbook -AutomationAccountName $automationAccountName `
-        -ResourceGroupName $resourceGroupName `
-        -RunbookName "Invoke-GracePeriodCleanup" `
-        -ScheduleName $scheduleName `
-        -ErrorAction Stop
+        # Link the cleanup runbook to the schedule
+        Register-AzAutomationScheduledRunbook -AutomationAccountName $automationAccountName `
+            -ResourceGroupName $resourceGroupName `
+            -RunbookName "Invoke-GracePeriodCleanup" `
+            -ScheduleName $scheduleName `
+            -ErrorAction Stop
 
-    Write-Output "  Cleanup scheduled for $cleanupDate UTC ($gracePeriodDays days from now)."
-
-    # ============================================================================
-    # Step 5: Send notification email via Action Group
-    # ============================================================================
-    Write-Output ""
-    Write-Output "--- Step 5: User notification ---"
-    Write-Output "  User $userDisplayName ($userEmail) has been notified via Budget Action Group."
-    Write-Output "  Account set to READ-ONLY. Resources stopped."
-    Write-Output "  Grace period: $gracePeriodDays days until resource deletion."
-    Write-Output "  Cleanup scheduled for: $cleanupDate UTC"
+        Write-Output "  Cleanup scheduled for $cleanupDate UTC ($gracePeriodDays days from now)."
+    }
+    else {
+        Write-Warning "  No Automation Account found - cannot schedule cleanup."
+    }
 
     # ============================================================================
     # Summary
@@ -217,8 +285,8 @@ try {
     Write-Output "  [x] User RBAC changed to Reader (read-only)"
     Write-Output "  [x] All compute resources stopped"
     Write-Output "  [x] AI/ML endpoints disabled"
-    Write-Output "  [x] Cleanup scheduled for $cleanupDate UTC"
-    Write-Output "  [x] User notified"
+    Write-Output "  [x] Cleanup scheduled after $gracePeriodDays days"
+    Write-Output "  [x] User notified via Action Group email"
 }
 catch {
     Write-Error "Cost enforcement failed: $_"

@@ -3,15 +3,15 @@
 // ============================================================================
 // Creates:
 //   - Action Group for warning notifications (email at $15)
-//   - Action Group for hard limit enforcement (webhook at $20)
-//   - Budget with thresholds at $15 (75%) and $20 (100%)
-//   - The budget amount is set to $20 so thresholds are percentage-based
+//   - Action Group for hard limit enforcement (email + automation runbook at $20)
+//   - Budget with thresholds:
+//       75% actual   = $15 warning email
+//       90% forecast = proactive warning
+//       100% actual  = $20 hard enforcement
+//   - The budget amount is set to $20 (hardLimitThreshold)
 // ============================================================================
 
 // === Parameters ===
-@description('Azure region for action group')
-param location string
-
 @description('Unique suffix for resource naming')
 param uniqueSuffix string
 
@@ -26,9 +26,6 @@ param warningThreshold int
 
 @description('Hard limit threshold in USD')
 param hardLimitThreshold int
-
-@description('Name of the resource group being monitored')
-param resourceGroupName string
 
 @description('Budget start date (YYYY-MM-01 format)')
 param budgetStartDate string
@@ -64,8 +61,10 @@ resource warningActionGroup 'Microsoft.Insights/actionGroups@2023-09-01-preview'
 }
 
 // === Action Group: Hard Limit Enforcement ===
-// This action group will be configured to trigger the Automation Runbook
-// The webhook URL will be set post-deployment by the orchestration script
+// This action group emails the user when the hard limit is reached.
+// The automation runbook receiver is wired post-deployment by the script
+// (webhooks cannot be created declaratively in Bicep due to URI security).
+// As backup, a daily schedule on the Automation Account also checks costs.
 resource enforceActionGroup 'Microsoft.Insights/actionGroups@2023-09-01-preview' = {
   name: actionGroupEnforceName
   location: 'Global'
@@ -80,14 +79,12 @@ resource enforceActionGroup 'Microsoft.Insights/actionGroups@2023-09-01-preview'
         useCommonAlertSchema: true
       }
     ]
-    // Automation runbook receivers will be added post-deployment
-    // via the orchestration script once the Automation Account is created
   }
 }
 
 // === Budget ===
 // Scoped to resource group - monitors all costs within the user's RG
-resource budget 'Microsoft.Consumption/budgets@2024-08-01' = {
+resource budget 'Microsoft.Consumption/budgets@2023-11-01' = {
   name: budgetName
   properties: {
     timePeriod: {
@@ -140,15 +137,8 @@ resource budget 'Microsoft.Consumption/budgets@2024-08-01' = {
         locale: 'en-us'
       }
     }
-    filter: {
-      dimensions: {
-        name: 'ResourceGroup'
-        operator: 'In'
-        values: [
-          resourceGroupName
-        ]
-      }
-    }
+    // Budget is deployed at RG scope, so it automatically filters to this RG.
+    // No additional dimension filter needed.
   }
 }
 

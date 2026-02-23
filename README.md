@@ -8,15 +8,18 @@ Automated Infrastructure-as-Code solution for provisioning per-user Azure sandbo
 - [Architecture](#architecture)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
+- [Execution Modes](#execution-modes)
 - [Detailed Setup](#detailed-setup)
-- [Input File Format](#input-file-format)
 - [What Gets Deployed](#what-gets-deployed)
-- [Cost Management](#cost-management)
 - [Security Model](#security-model)
-- [Customization](#customization)
+- [Cost Management](#cost-management)
+- [Optional: User Creation Module](#optional-user-creation-module)
 - [Cleanup](#cleanup)
 - [CI/CD with GitHub Actions](#cicd-with-github-actions)
+- [Customization](#customization)
 - [Troubleshooting](#troubleshooting)
+- [Project Structure](#project-structure)
+- [Documentation](#documentation)
 - [Contributing](#contributing)
 
 ---
@@ -27,10 +30,9 @@ This solution enables a tenant administrator to repeatably provision isolated Az
 
 | Feature | Description |
 |---------|-------------|
-| **Subscription** | Dedicated subscription (or shared, configurable) |
-| **Resource Group** | Pre-created default RG; user cannot create additional RGs |
+| **Resource Group** | Pre-created default RG; user **cannot** create additional RGs |
 | **AI Foundry** | Azure AI Hub + Project with storage, Key Vault, and monitoring |
-| **RBAC** | Contributor within their RG; policy-restricted from creating new RGs |
+| **RBAC** | Contributor within their RG only; custom deny role at subscription scope |
 | **Cost Monitoring** | $15 warning email, $20 hard enforcement |
 | **Auto-Enforcement** | Account set to read-only, resources stopped, 5-day grace period then deletion |
 
@@ -59,20 +61,20 @@ This solution enables a tenant administrator to repeatably provision isolated Az
 │  │  │                                                          ││  │
 │  │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   ││  │
 │  │  │  │ AI Foundry   │  │ Key Vault    │  │ Storage      │   ││  │
-│  │  │  │ Hub + Project│  │              │  │ Account      │   ││  │
+│  │  │  │ Hub + Project│  │ (RBAC auth)  │  │ Account      │   ││  │
 │  │  │  └──────────────┘  └──────────────┘  └──────────────┘   ││  │
 │  │  │                                                          ││  │
 │  │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   ││  │
 │  │  │  │ App Insights │  │ Log          │  │ Automation   │   ││  │
-│  │  │  │              │  │ Analytics    │  │ Account      │   ││  │
+│  │  │  │              │  │ Analytics    │  │ Account (MI) │   ││  │
 │  │  │  └──────────────┘  └──────────────┘  └──────────────┘   ││  │
 │  │  │                                                          ││  │
 │  │  └──────────────────────────────────────────────────────────┘│  │
 │  │                                                               │  │
-│  │  ┌─── Subscription-Level ────────────────────────────────────┐│  │
-│  │  │  • Azure Policy (deny extra RG creation)                  ││  │
-│  │  │  • Budget ($15 warn / $20 enforce)                        ││  │
-│  │  │  • Action Groups (email + automation webhook)             ││  │
+│  │  ┌─── Subscription-Level Controls ───────────────────────────┐│  │
+│  │  │  • Custom Role: Deny RG create/delete                     ││  │
+│  │  │  • Azure Policy: Naming convention guardrail (rg-*)       ││  │
+│  │  │  • Budget: $15 warn / $20 enforce (email + automation)    ││  │
 │  │  └───────────────────────────────────────────────────────────┘│  │
 │  └───────────────────────────────────────────────────────────────┘  │
 │                                                                     │
@@ -97,72 +99,108 @@ This solution enables a tenant administrator to repeatably provision isolated Az
          └─────────────────────────────────────────────┘
 ```
 
+### Security Boundary Model (2 Layers)
+
+| Layer | Mechanism | Purpose |
+|-------|-----------|--------|
+| **Layer 1** (RBAC) | Contributor at **RG scope only** | User has no subscription-level perms — cannot create RGs |
+| **Layer 2** (Policy) | Naming convention: `rg-*` only | Guardrail if future role changes widen permissions |
+
 ## Prerequisites
 
 ### Software Requirements
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| [Azure CLI](https://aka.ms/installazurecli) | ≥ 2.60 | Azure management |
-| [Bicep CLI](https://learn.microsoft.com/azure/azure-resource-manager/bicep/install) | ≥ 0.28 | IaC compilation (auto-installed with Azure CLI) |
-| PowerShell | ≥ 7.4 | Orchestration scripts |
-| Git | ≥ 2.0 | Version control |
+| [Azure CLI](https://aka.ms/installazurecli) | >= 2.60 | Azure management |
+| [Bicep CLI](https://learn.microsoft.com/azure/azure-resource-manager/bicep/install) | >= 0.28 | IaC compilation (auto-installed with Azure CLI) |
+| PowerShell | >= 7.4 | Orchestration scripts |
+| Git | >= 2.0 | Version control |
 
 ### Azure Requirements
 
 | Requirement | Details |
 |-------------|---------|
 | **Tenant Admin** | Global Administrator or Subscription Owner role |
-| **Billing Access** | EA Enrollment Account or MCA Billing Profile (for new subscription creation) |
-| **Entra ID** | Users must exist in the tenant before provisioning |
-| **Resource Providers** | `Microsoft.MachineLearningServices`, `Microsoft.CognitiveServices`, `Microsoft.Automation` must be registered |
+| **Entra ID Access** | User.Read.All to resolve Object IDs from UPNs |
+| **Resource Providers** | Several providers must be registered (handled automatically by script) |
 
-### Register Required Resource Providers
-
-```bash
-az provider register --namespace Microsoft.MachineLearningServices
-az provider register --namespace Microsoft.CognitiveServices
-az provider register --namespace Microsoft.Automation
-az provider register --namespace Microsoft.Consumption
-az provider register --namespace Microsoft.Insights
-az provider register --namespace Microsoft.PolicyInsights
-```
+See the **[Admin Connection Guide](docs/admin-connection-guide.md)** for detailed authentication options (interactive, service principal, managed identity).
 
 ## Quick Start
 
 ```bash
 # 1. Clone this repository
-git clone https://github.com/YOUR-ORG/azure-user-provisioning.git
+git clone https://github.com/RaikHerrmann/azure-user-provisioning.git
 cd azure-user-provisioning
 
 # 2. Login to Azure as tenant admin
 az login --tenant YOUR_TENANT_ID
 
 # 3. Edit the input file with your users
-# Edit input/users.csv or input/users.json
+#    Edit input/users.csv or input/users.json
 
-# 4. Run the provisioning script
+# 4. Preview changes first (what-if)
 cd scripts
-pwsh ./Deploy-UserEnvironment.ps1 -InputFile "../input/users.csv" -Location "swedencentral"
-
-# 5. (Optional) Preview changes first
 pwsh ./Deploy-UserEnvironment.ps1 -InputFile "../input/users.csv" -WhatIf
+
+# 5. Deploy all users
+pwsh ./Deploy-UserEnvironment.ps1 -InputFile "../input/users.csv" -Location "swedencentral"
 ```
+
+## Execution Modes
+
+The solution supports three execution modes to accommodate testing, debugging, and production use:
+
+### 1. Full Batch (All Users at Once)
+
+```powershell
+pwsh ./Deploy-UserEnvironment.ps1 -InputFile "../input/users.csv"
+```
+
+Processes all users from the input file sequentially. Best for production deployments.
+
+### 2. Step-by-Step (Interactive with Pauses)
+
+```powershell
+pwsh ./Deploy-UserEnvironment.ps1 -InputFile "../input/users.csv" -Step
+```
+
+Pauses after each phase for you to review:
+- Phase 1: Prerequisites validation
+- Phase 2: Input file reading
+- Phase 3: Entra ID identity resolution
+- Phase 4: Resource provider registration
+- Phase 5: Per-user Bicep deployment + runbook upload
+- Phase 6: Summary
+
+Press ENTER to continue or `q` to quit at any pause.
+
+### 3. Single User (Testing / Debugging)
+
+```powershell
+pwsh ./Deploy-UserEnvironment.ps1 `
+  -InputFile "../input/users.csv" `
+  -SingleUser "john.doe@contoso.com" `
+  -Step
+```
+
+Deploys for one user only. Combine with `-Step` for full debugging control.
 
 ## Detailed Setup
 
-### Step 1: Configure Input File
+See the **[Sample Walkthrough](docs/sample-walkthrough.md)** for a complete end-to-end guide with example commands and expected outputs.
 
-Create your user list in CSV or JSON format:
+### Input File Format
 
-**CSV Format** (`input/users.csv`):
+**CSV** (`input/users.csv`):
 ```csv
 UserPrincipalName,DisplayName,Email,Department,CostCenter
 john.doe@contoso.com,John Doe,john.doe@contoso.com,Engineering,CC-1001
 jane.smith@contoso.com,Jane Smith,jane.smith@contoso.com,Data Science,CC-1002
 ```
 
-**JSON Format** (`input/users.json`):
+**JSON** (`input/users.json`):
 ```json
 {
   "users": [
@@ -177,71 +215,24 @@ jane.smith@contoso.com,Jane Smith,jane.smith@contoso.com,Data Science,CC-1002
 }
 ```
 
-### Step 2: Subscription Setup
-
-**Option A: Automatic Subscription Creation (EA/MCA)**
-
-If you have Enterprise Agreement or Microsoft Customer Agreement billing access:
-
-```bash
-pwsh ./Deploy-UserEnvironment.ps1 \
-  -InputFile "../input/users.csv" \
-  -BillingAccountName "1234567" \
-  -BillingProfileName "xxxx-xxxx" \
-  -InvoiceSectionName "yyyy-yyyy"
-```
-
-**Option B: Use Existing Subscriptions**
-
-Add `SubscriptionId` column to your CSV:
-```csv
-UserPrincipalName,DisplayName,Email,Department,CostCenter,SubscriptionId
-john.doe@contoso.com,John Doe,john.doe@contoso.com,Engineering,CC-1001,xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-```
-
-Then run with `-SkipSubscriptionCreation`:
-```bash
-pwsh ./Deploy-UserEnvironment.ps1 -InputFile "../input/users.csv" -SkipSubscriptionCreation
-```
-
-### Step 3: Deploy
-
-```bash
-# Full deployment
-pwsh ./Deploy-UserEnvironment.ps1 -InputFile "../input/users.csv" -Location "swedencentral"
-
-# Customized thresholds
-pwsh ./Deploy-UserEnvironment.ps1 \
-  -InputFile "../input/users.csv" \
-  -Location "westeurope" \
-  -WarningBudget 10 \
-  -HardLimitBudget 15 \
-  -GracePeriodDays 3
-```
-
-### Step 4: Verify
-
-After deployment, check results in the `logs/` directory:
-- `deployment-{timestamp}.log` — Full deployment transcript
-- `results-{timestamp}.csv` — Summary of all user environments
+Optional columns: `SubscriptionId` (to use an existing subscription instead of the current one).
 
 ## What Gets Deployed
 
 ### Per-User Resources
 
-| Resource | Purpose |
-|----------|---------|
-| **Resource Group** | `rg-{user-name-sanitized}` — Isolated container for all user resources |
-| **Azure AI Hub** | `aihub-{unique}` — AI Foundry workspace for model management |
-| **Azure AI Project** | `aiproj-{unique}` — AI project within the hub |
-| **Storage Account** | `staifoundry{unique}` — Data storage for AI workloads |
-| **Key Vault** | `kv-ai-{unique}` — Secrets management (RBAC-enabled, no key access) |
-| **Application Insights** | `appi-ai-{unique}` — Application monitoring |
-| **Log Analytics** | `log-ai-{unique}` — Centralized logging |
-| **Automation Account** | `aa-cost-{unique}` — Cost enforcement automation |
-| **Budget** | Monthly budget with warning and hard limit thresholds |
-| **Action Groups** | Email notifications and automation webhooks |
-| **Azure Policy** | Deny creation of additional resource groups |
+| Resource | Name Pattern | Purpose |
+|----------|-------------|---------|
+| **Resource Group** | `rg-{user-sanitized}` | Isolated container |
+| **Azure AI Hub** | `aihub-{unique}` | AI Foundry workspace |
+| **Azure AI Project** | `aiproj-{unique}` | AI project within hub |
+| **Storage Account** | `staifoundry{unique}` | Data storage (shared key disabled) |
+| **Key Vault** | `kv-ai-{unique}` | Secrets (RBAC auth, no access policies) |
+| **Application Insights** | `appi-ai-{unique}` | Monitoring |
+| **Log Analytics** | `log-ai-{unique}` | Logging |
+| **Automation Account** | `aa-cost-{unique}` | Cost enforcement (System MI) |
+| **Budget** | `budget-{unique}` | Monthly budget with thresholds |
+| **Action Groups** | `ag-warning-*`, `ag-enforce-*` | Email notifications |
 
 ### RBAC Assignments
 
@@ -251,192 +242,149 @@ After deployment, check results in the `logs/` directory:
 | User | **Azure AI Developer** | AI Foundry Hub |
 | User | **Cognitive Services OpenAI User** | AI Foundry Hub |
 | Tenant Admin | **Owner** | Resource Group |
-| Automation Account (MI) | **Contributor** | Resource Group |
-
-## Cost Management
-
-### Thresholds and Actions
-
-| Threshold | Trigger | Actions |
-|-----------|---------|---------|
-| **$15** (75% of budget) | Actual cost reaches $15 | Warning email sent to user |
-| **90% Forecast** | Forecasted cost reaches 90% | Proactive warning email |
-| **$20** (100% of budget) | Actual cost reaches $20 | **Full enforcement** (see below) |
-
-### Enforcement at $20
-
-When the hard limit is reached, the **Invoke-CostEnforcement** runbook executes:
-
-1. **Read-Only Mode**: User's Contributor role is replaced with Reader
-2. **Resource Stop**: All VMs, Web Apps, Function Apps are stopped
-3. **AI Endpoints Disabled**: ML online endpoints scaled to 0 instances
-4. **User Notified**: Email sent explaining the situation
-5. **Grace Period Started**: 5-day countdown begins (configurable)
-
-### After Grace Period (Day 5)
-
-The **Invoke-GracePeriodCleanup** runbook executes:
-
-1. **Final Warning**: User receives final notification
-2. **Resource Deletion**: All resources in the RG are systematically deleted
-3. **RBAC Cleanup**: All role assignments are removed
-4. **Audit Log**: Full inventory of deleted resources logged
-
-### Budget Timeline Example
-
-```
-Day 1-10: User works normally, costs accumulate
-Day 11:   $15 reached → Warning email
-Day 13:   $20 reached → Account locked to read-only, resources stopped
-Day 13-18: Grace period (5 days) — user can read/view but not modify
-Day 18:   All resources deleted, user notified
-```
+| Automation MI | **Contributor** | Resource Group |
+| Automation MI | **User Access Administrator** | Resource Group |
 
 ## Security Model
 
-### Principle of Least Privilege
+### What Users CAN Do
 
-- Users get **Contributor** scoped only to their resource group (not subscription)
-- Azure Policy **denies** resource group creation at subscription level
-- Key Vault uses **RBAC authorization** (no access policies)
-- Storage Account has **shared key access disabled**
-- Automation Account uses **System-Assigned Managed Identity**
-- No credentials are stored in code or variables (only object IDs)
+- Create, manage, delete resources **within** their resource group
+- Use AI Foundry (Hub + Project)
+- Access Key Vault via RBAC
 
-### Policy Enforcement
+### What Users CANNOT Do
 
-The Azure Policy `Deny Resource Group Creation` ensures:
-- Users cannot create any resource groups beyond their default one
-- The tenant admin (Owner) can manage policies and override when needed
-- Non-compliance messages clearly explain the restriction
+- Create or delete resource groups
+- Access other users' resource groups
+- Modify RBAC assignments
+- Modify subscription-level settings
+- Access resources outside their sandbox
+
+## Cost Management
+
+| Threshold | Trigger | Actions |
+|-----------|---------|---------|
+| **$15** (75%) | Actual cost >= $15 | Warning email |
+| **90% Forecast** | Forecasted >= 90% | Proactive warning email |
+| **$20** (100%) | Actual cost >= $20 | Full enforcement |
+
+### Enforcement at $20
+
+1. User's Contributor role → Reader (read-only)
+2. All VMs, Web Apps, Function Apps stopped
+3. ML endpoints disabled
+4. User notified via email
+5. 5-day grace period scheduled
+
+### Enforcement Reliability
+
+| Path | How | Latency |
+|------|-----|---------|
+| Budget notification | Email via Action Group | 8-24h (Azure cost data delay) |
+| Daily scheduled check | Runbook queries Cost Management API | <= 24h (runs at 06:00 UTC) |
+
+## Optional: User Creation Module
+
+If users don't already exist in Entra ID:
+
+```powershell
+# Preview
+pwsh ./scripts/New-TenantUsers.ps1 -InputFile "./input/users.csv" -WhatIf
+
+# Create users (generates random temp passwords)
+pwsh ./scripts/New-TenantUsers.ps1 -InputFile "./input/users.csv"
+```
+
+Outputs credentials to `output/new-users-{timestamp}.csv`. Requires Global Admin or User Admin role.
+
+## Cleanup
+
+```powershell
+# Remove single user
+pwsh ./scripts/Remove-UserEnvironment.ps1 `
+  -UserPrincipalName "john.doe@contoso.com" `
+  -SubscriptionId "xxxx"
+
+# Remove all users
+Import-Csv "./input/users.csv" | ForEach-Object {
+    pwsh ./scripts/Remove-UserEnvironment.ps1 `
+      -UserPrincipalName $_.UserPrincipalName `
+      -SubscriptionId "xxxx" -Force
+}
+```
+
+Cleans up: resources, resource group, custom roles, policies, RBAC, deployment history.
+
+## CI/CD with GitHub Actions
+
+The included workflow (`.github/workflows/provision-users.yml`) supports:
+
+- **Auto-provision** on push to `main` when input/infra files change
+- **Manual trigger** with configurable parameters
+- **PR preview** with what-if validation
+- **Log upload** as build artifact
+
+Setup: Create a service principal, add `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` as repo secrets. See [Admin Connection Guide](docs/admin-connection-guide.md#option-2-service-principal-recommended-for-cicd).
 
 ## Customization
-
-### Configuration Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `Location` | `swedencentral` | Azure region |
-| `WarningBudget` | `15` | Warning email threshold (USD) |
+| `WarningBudget` | `15` | Warning threshold (USD) |
 | `HardLimitBudget` | `20` | Enforcement threshold (USD) |
-| `GracePeriodDays` | `5` | Days before resource deletion |
-| `SubscriptionOfferType` | `MS-AZR-0017P` | Offer type for new subscriptions |
+| `GracePeriodDays` | `5` | Days before deletion |
 
-### Adding More Resources
+To add resources: create Bicep modules in `infra/modules/` and wire in `infra/main.bicep`.
 
-To add additional resources to each user's environment, modify `infra/modules/aiFoundry.bicep` or create new Bicep modules and reference them in `infra/main.bicep`.
+## Troubleshooting
 
-### Changing AI Foundry Configuration
-
-Edit `infra/modules/aiFoundry.bicep` to:
-- Add Azure OpenAI connections
-- Deploy specific model endpoints
-- Configure container registry
-- Adjust SKU tiers
-
-## Cleanup
-
-### Remove a Single User Environment
-
-```bash
-pwsh ./scripts/Remove-UserEnvironment.ps1 \
-  -UserPrincipalName "john.doe@contoso.com" \
-  -SubscriptionId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-```
-
-### Remove All Environments (Batch)
-
-```bash
-# Process all users from the input file
-$users = Import-Csv "./input/users.csv"
-foreach ($user in $users) {
-    pwsh ./scripts/Remove-UserEnvironment.ps1 \
-      -UserPrincipalName $user.UserPrincipalName \
-      -SubscriptionId $user.SubscriptionId \
-      -Force
-}
-```
-
-## CI/CD with GitHub Actions
-
-The included GitHub Actions workflow (`.github/workflows/provision-users.yml`) enables:
-
-- **Automated provisioning** on push to `main` when input files change
-- **Manual trigger** via `workflow_dispatch` with customizable parameters
-- **PR preview** with `what-if` validation on pull requests
-- **Scheduled runs** (optional) for periodic reconciliation
-
-### Setup
-
-1. Create a Service Principal with appropriate permissions:
-   ```bash
-   az ad sp create-for-rbac --name "sp-user-provisioning" \
-     --role Owner --scopes /providers/Microsoft.Management/managementGroups/YOUR_MG_ID
-   ```
-
-2. Add GitHub repository secrets:
-   - `AZURE_CLIENT_ID` — Service Principal App ID
-   - `AZURE_TENANT_ID` — Azure AD Tenant ID
-   - `AZURE_SUBSCRIPTION_ID` — Default Subscription ID
-   - `AZURE_CLIENT_SECRET` — Service Principal Secret (or use OIDC)
-
-3. Push changes to trigger the workflow.
+| Issue | Solution |
+|-------|----------|
+| User not found in Entra ID | Create user first or use `New-TenantUsers.ps1` |
+| AuthorizationFailed | Verify admin has Owner + UAA roles |
+| AI Foundry deployment fails | Use a supported region |
+| Budget not enforcing | Daily schedule backup checks every 24h |
 
 ## Project Structure
 
 ```
 azure-user-provisioning/
-├── 📁 infra/                          # Bicep IaC templates
-│   ├── main.bicep                     # Main orchestrator (subscription scope)
+├── infra/                              # Bicep IaC templates
+│   ├── main.bicep                      # Main orchestrator (subscription scope)
 │   └── modules/
-│       ├── rbac.bicep                 # RBAC role assignments
-│       ├── policy.bicep               # Azure Policy (deny RG creation)
-│       ├── aiFoundry.bicep            # AI Foundry Hub + Project + deps
-│       ├── budget.bicep               # Budgets + Action Groups
-│       └── costEnforcement.bicep      # Automation Account + Runbooks
-├── 📁 scripts/                        # PowerShell orchestration
-│   ├── Deploy-UserEnvironment.ps1     # Main provisioning script
-│   ├── Remove-UserEnvironment.ps1     # Cleanup/teardown script
+│       ├── rbac.bicep                  # RBAC role assignments
+│       ├── policy.bicep                # Custom deny role + naming policy
+│       ├── aiFoundry.bicep             # AI Foundry Hub + Project + deps
+│       ├── budget.bicep                # Budgets + Action Groups (email)
+│       └── costEnforcement.bicep       # Automation + runbooks + schedule
+├── scripts/                            # PowerShell orchestration
+│   ├── Deploy-UserEnvironment.ps1      # Main provisioning (batch/step/single)
+│   ├── Remove-UserEnvironment.ps1      # Cleanup/teardown
+│   ├── New-TenantUsers.ps1            # Optional: Entra ID user creation
 │   └── runbooks/
-│       ├── Invoke-CostEnforcement.ps1 # Budget enforcement runbook
-│       └── Invoke-GracePeriodCleanup.ps1  # Grace period cleanup runbook
-├── 📁 input/                          # User input files
-│   ├── users.csv                      # CSV format (example)
-│   └── users.json                     # JSON format (example)
-├── 📁 .github/workflows/             # CI/CD
-│   └── provision-users.yml            # GitHub Actions workflow
-├── 📁 logs/                           # Deployment logs (gitignored)
+│       ├── Invoke-CostEnforcement.ps1  # Budget enforcement runbook
+│       └── Invoke-GracePeriodCleanup.ps1
+├── input/                              # User input files
+│   ├── users.csv                       # CSV example
+│   └── users.json                      # JSON example
+├── docs/                               # Documentation
+│   ├── admin-connection-guide.md       # How to connect as admin
+│   └── sample-walkthrough.md           # End-to-end walkthrough
+├── .github/workflows/
+│   └── provision-users.yml             # GitHub Actions CI/CD
 ├── .gitignore
-└── README.md                          # This file
+├── LICENSE
+└── README.md
 ```
 
-## Troubleshooting
+## Documentation
 
-### Common Issues
-
-| Issue | Cause | Solution |
-|-------|-------|----------|
-| `User not found` | User doesn't exist in Entra ID | Create the user first or check UPN |
-| `Subscription creation failed` | Missing billing access | Verify EA/MCA enrollment or use existing subscriptions |
-| `Policy conflict` | Existing policies interfere | Check `az policy assignment list` |
-| `AI Foundry deployment fails` | Region not supported | Use a supported region (swedencentral, eastus, etc.) |
-| `Budget not triggering` | Cost data delay | Azure cost data can be delayed 8-24 hours |
-
-### Useful Commands
-
-```bash
-# Check deployment status
-az deployment sub list --query "[?contains(name,'user-env')]" -o table
-
-# View policy assignments
-az policy assignment list --subscription $SUB_ID -o table
-
-# Check budget status
-az consumption budget list --subscription $SUB_ID -o table
-
-# View automation job history
-az automation job list --automation-account-name $AA_NAME -g $RG_NAME -o table
-```
+| Document | Description |
+|----------|-------------|
+| **[Admin Connection Guide](docs/admin-connection-guide.md)** | Authentication options (interactive, service principal, MI) |
+| **[Sample Walkthrough](docs/sample-walkthrough.md)** | Complete end-to-end deployment example |
 
 ## Contributing
 

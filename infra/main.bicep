@@ -122,24 +122,7 @@ module aiFoundry 'modules/aiFoundry.bicep' = {
   }
 }
 
-// === Cost Management: Budgets + Action Groups ===
-module costManagement 'modules/budget.bicep' = {
-  name: 'cost-mgmt-${uniqueSuffix}'
-  scope: defaultResourceGroup
-  params: {
-    location: location
-    uniqueSuffix: uniqueSuffix
-    userEmail: userEmail
-    userDisplayName: userDisplayName
-    warningThreshold: warningBudgetThreshold
-    hardLimitThreshold: hardLimitBudgetThreshold
-    resourceGroupName: resourceGroupName
-    budgetStartDate: budgetStartDate
-    tags: commonTags
-  }
-}
-
-// === Cost Enforcement Automation ===
+// === Cost Enforcement Automation (deployed BEFORE budget so we can wire the runbook) ===
 module costEnforcement 'modules/costEnforcement.bicep' = {
   name: 'cost-enforce-${uniqueSuffix}'
   scope: defaultResourceGroup
@@ -153,6 +136,21 @@ module costEnforcement 'modules/costEnforcement.bicep' = {
     subscriptionId: subscription().subscriptionId
     gracePeriodDays: gracePeriodDays
     hardLimitThreshold: hardLimitBudgetThreshold
+    tags: commonTags
+  }
+}
+
+// === Cost Management: Budgets + Action Groups ===
+module costManagement 'modules/budget.bicep' = {
+  name: 'cost-mgmt-${uniqueSuffix}'
+  scope: defaultResourceGroup
+  params: {
+    uniqueSuffix: uniqueSuffix
+    userEmail: userEmail
+    userDisplayName: userDisplayName
+    warningThreshold: warningBudgetThreshold
+    hardLimitThreshold: hardLimitBudgetThreshold
+    budgetStartDate: budgetStartDate
     tags: commonTags
   }
 }

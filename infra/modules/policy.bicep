@@ -1,10 +1,23 @@
 // ============================================================================
-// policy.bicep - Azure Policy to deny additional resource group creation
+// policy.bicep - Restrict user to their assigned resource group only
 // ============================================================================
-// Creates a policy assignment at subscription scope that:
-//   - Denies the user from creating any resource groups other than the
-//     pre-provisioned default one
-//   - Exempts the tenant admin from this restriction
+// Strategy:
+//   We enforce resource group boundaries through TWO LAYERS:
+//
+//   Layer 1 (RBAC - primary): User gets Contributor ONLY at RG scope.
+//     => They have NO subscription-level role, so they CANNOT create RGs.
+//     This is the real enforcement — without subscription-level permissions,
+//     the user simply cannot call the RG create/delete APIs.
+//
+//   Layer 2 (Policy - guardrail): A subscription-scoped Azure Policy denies
+//     creation of resource groups that don't match the naming convention.
+//     This protects against future role changes that might accidentally
+//     grant broader subscription-level permissions.
+//
+//   NOTE: Azure RBAC custom roles with notActions do NOT create deny effects.
+//   notActions only subtract from actions in the SAME role definition.
+//   True deny assignments require Azure Blueprints or Managed Applications.
+//   Therefore we rely on scoped RBAC (Layer 1) + Policy (Layer 2) only.
 // ============================================================================
 
 targetScope = 'subscription'
@@ -20,38 +33,21 @@ param allowedResourceGroupName string
 param tenantAdminObjectId string
 
 // === Variables ===
-var policyName = 'deny-rg-creation-${userObjectId}'
-var policyDisplayName = 'Deny Resource Group Creation (except default)'
+var uniqueSuffix = uniqueString(subscription().subscriptionId, userObjectId)
 
-// === Policy Definition ===
-// Custom policy that denies Microsoft.Resources/subscriptions/resourceGroups/write
-// unless the target is the allowed resource group name
-resource denyRgPolicyDefinition 'Microsoft.Authorization/policyDefinitions@2023-04-01' = {
-  name: 'deny-extra-rg-${uniqueString(subscription().subscriptionId, userObjectId)}'
+// === Policy: Naming convention guardrail for resource groups ===
+// Safety net: even if someone accidentally grants broader RBAC permissions,
+// only resource groups matching "rg-*" can be created.
+resource rgNamingPolicy 'Microsoft.Authorization/policyDefinitions@2021-06-01' = {
+  name: 'rg-naming-convention-${uniqueSuffix}'
   properties: {
     policyType: 'Custom'
     mode: 'All'
-    displayName: policyDisplayName
-    description: 'Prevents creation of resource groups except the pre-provisioned default resource group for the user sandbox.'
+    displayName: 'Enforce RG naming convention (rg-*)'
+    description: 'Ensures resource groups follow the naming pattern rg-* to enforce sandbox boundaries.'
     metadata: {
       category: 'Resource Management'
       version: '1.0.0'
-    }
-    parameters: {
-      allowedRgName: {
-        type: 'String'
-        metadata: {
-          description: 'The name of the allowed resource group'
-          displayName: 'Allowed Resource Group Name'
-        }
-      }
-      restrictedUserObjectId: {
-        type: 'String'
-        metadata: {
-          description: 'The Object ID of the user to restrict'
-          displayName: 'Restricted User Object ID'
-        }
-      }
     }
     policyRule: {
       if: {
@@ -61,8 +57,10 @@ resource denyRgPolicyDefinition 'Microsoft.Authorization/policyDefinitions@2023-
             equals: 'Microsoft.Resources/subscriptions/resourceGroups'
           }
           {
-            field: 'name'
-            notEquals: '[parameters(\'allowedRgName\')]'
+            not: {
+              field: 'name'
+              like: 'rg-*'
+            }
           }
         ]
       }
@@ -73,39 +71,21 @@ resource denyRgPolicyDefinition 'Microsoft.Authorization/policyDefinitions@2023-
   }
 }
 
-// === Policy Assignment ===
-resource denyRgPolicyAssignment 'Microsoft.Authorization/policyAssignments@2024-04-01' = {
-  name: policyName
+resource rgNamingPolicyAssignment 'Microsoft.Authorization/policyAssignments@2022-06-01' = {
+  name: 'rg-naming-${uniqueSuffix}'
   properties: {
-    policyDefinitionId: denyRgPolicyDefinition.id
-    displayName: '${policyDisplayName} - ${userObjectId}'
-    description: 'Denies resource group creation for user ${userObjectId} except ${allowedResourceGroupName}'
+    policyDefinitionId: rgNamingPolicy.id
+    displayName: 'Enforce RG naming convention - ${uniqueSuffix}'
+    description: 'Guardrail: only allow resource groups matching rg-* naming pattern'
     enforcementMode: 'Default'
-    parameters: {
-      allowedRgName: {
-        value: allowedResourceGroupName
-      }
-      restrictedUserObjectId: {
-        value: userObjectId
-      }
-    }
     nonComplianceMessages: [
       {
-        message: 'You are not allowed to create additional resource groups. Please use your assigned resource group: ${allowedResourceGroupName}'
+        message: 'Resource group names must follow the pattern "rg-*". Please use your assigned resource group: ${allowedResourceGroupName}'
       }
     ]
   }
 }
 
-// === Policy Exemption for Tenant Admin ===
-// Note: Policy exemptions require the admin to be identified differently.
-// Since Azure Policy applies to resources not principals, we use a different approach:
-// The admin has Owner role and can manage policy assignments directly.
-// The policy targets resource group creation, not specific users.
-// To make this user-specific, we rely on the combination of:
-//   - Contributor RBAC scoped to the specific RG (user can only act in their RG)
-//   - No subscription-level role for the user that would allow RG creation
-
 // === Outputs ===
-output policyDefinitionId string = denyRgPolicyDefinition.id
-output policyAssignmentId string = denyRgPolicyAssignment.id
+output policyDefinitionId string = rgNamingPolicy.id
+output policyAssignmentId string = rgNamingPolicyAssignment.id
