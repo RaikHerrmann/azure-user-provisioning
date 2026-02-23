@@ -76,6 +76,28 @@ This creates the accounts and saves temporary passwords to `output/new-users-*.c
 
 Creates one Azure subscription per user, all under the **same billing account**. This ensures centralized billing and cost visibility.
 
+### Which billing types are supported?
+
+Before finding your billing scope, check which billing type your tenant uses:
+
+```bash
+az billing account list --query "[].{Name:displayName, Type:agreementType}" -o table
+```
+
+| Agreement Type (from command) | Billing Type | Can This Script Create Subscriptions? |
+|---|---|---|
+| `MicrosoftCustomerAgreement` | MCA | **Yes** — fully automated |
+| `EnterpriseAgreement` | EA | **Yes** — fully automated |
+| `MicrosoftCustomerAgreement` (credit card) | Modern PAYG | **Yes** — uses MCA format |
+| `MicrosoftPartnerAgreement` | CSP | **No** — see below |
+| `MicrosoftOnlineServiceProgram` | Legacy PAYG | **No** — see below |
+
+**If your type is CSP:** Your Cloud Solution Provider partner must create the subscriptions through the Partner Center portal. Ask them to create one subscription per user, get the Subscription IDs, add them to the `SubscriptionId` column in your CSV, and skip directly to [Step 2](#step-2-deploy-everything-else). All subscriptions will still be under the same CSP billing arrangement.
+
+**If your type is Legacy MOSP:** You have two options: (1) upgrade to MCA in the Azure Portal (Cost Management > Billing > Upgrade), then re-run this script, or (2) manually create subscriptions in the Azure Portal (Subscriptions > Add) and enter the IDs in your CSV.
+
+> **The script auto-detects your billing type** and shows a detailed message if it's unsupported. You don't need to memorize this table.
+
 ### Find your billing scope
 
 You need your billing scope string. Run these commands to find it:

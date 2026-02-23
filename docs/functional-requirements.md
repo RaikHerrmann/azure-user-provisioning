@@ -68,6 +68,18 @@ A **tenant administrator** needs to provision isolated Azure sandbox environment
 - This ensures centralized cost visibility and billing management
 - The admin specifies the billing scope during subscription creation (Step 1)
 
+**Billing Type Support:**
+
+| Billing Type | Automated Creation (Step 1) | Centralized Billing |
+|---|---|---|
+| **MCA** (Microsoft Customer Agreement) | Yes — fully automated | Yes |
+| **EA** (Enterprise Agreement) | Yes — fully automated | Yes |
+| **Modern PAYG** (post-2019 credit card) | Yes — uses MCA format | Yes |
+| **CSP** (Cloud Solution Provider) | No — partner creates via Partner Center | Yes (managed by CSP partner) |
+| **Legacy MOSP** (pre-2019 PAYG) | No — create manually or upgrade to MCA | Yes (if created under same account) |
+
+For unsupported billing types, the script detects this automatically and guides the admin to create subscriptions manually. All subscriptions are still under a single billing arrangement regardless of creation method.
+
 ### FR-8: Repeatable Infrastructure as Code (IaC)
 
 - The entire solution is implemented in **Azure Bicep** (declarative IaC)

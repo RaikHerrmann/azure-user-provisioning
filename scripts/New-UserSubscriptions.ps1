@@ -12,10 +12,18 @@
     The deployment script (Step 2) will use that subscription.
 
     SUPPORTED BILLING TYPES:
-      - Microsoft Customer Agreement (MCA):
+      - Microsoft Customer Agreement (MCA):    FULLY SUPPORTED
         Billing scope: /providers/Microsoft.Billing/billingAccounts/{id}/billingProfiles/{id}/invoiceSections/{id}
-      - Enterprise Agreement (EA):
+      - Enterprise Agreement (EA):              FULLY SUPPORTED
         Billing scope: /providers/Microsoft.Billing/billingAccounts/{id}/enrollmentAccounts/{id}
+      - Modern Pay-As-You-Go (post-2019):       FULLY SUPPORTED (uses MCA format)
+
+    UNSUPPORTED (subscriptions must be created manually):
+      - CSP (Cloud Solution Provider):          Partner must create subscriptions via Partner Center
+      - Legacy MOSP (pre-2019 Pay-As-You-Go):  No programmatic subscription creation API
+
+    If your billing type is unsupported, skip this script and add existing
+    SubscriptionId values to your CSV/JSON file manually. Step 2 will use them.
 
     PREREQUISITES:
       - You must be logged in to Azure CLI (az login)
@@ -24,11 +32,17 @@
 
     HOW TO FIND YOUR BILLING SCOPE:
       1. Run: az billing account list -o table
-      2. Note your billing account name
+      2. Note your billing account name and agreement type
       3. For MCA, also run:
          az billing profile list --account-name "NAME" -o table
          az billing invoice section list --account-name "NAME" --profile-name "NAME" -o table
       4. Build the billing scope string from those IDs
+
+    HOW TO CHECK YOUR BILLING TYPE:
+      Run: az billing account list --query "[].{Name:displayName, Type:agreementType}" -o table
+      If the Type column shows 'MicrosoftCustomerAgreement' or 'EnterpriseAgreement', you can
+      use this script. If it shows 'MicrosoftPartnerAgreement' (CSP) or 'MicrosoftOnlineServiceProgram'
+      (legacy MOSP), you must create subscriptions manually.
 
 .PARAMETER InputFile
     Path to CSV or JSON file with user definitions.
@@ -122,6 +136,84 @@ Write-Host "  Logged in as:    $($account.user.name)" -ForegroundColor Green
 Write-Host "  Tenant:          $($account.tenantId)" -ForegroundColor Gray
 Write-Host "  Billing scope:   $BillingScope" -ForegroundColor Gray
 Write-Host ""
+
+# ============================================================================
+# Detect billing type and warn if unsupported
+# ============================================================================
+Write-StepInfo "Checking billing account type..."
+try {
+    $billingAccounts = az billing account list --query "[].{name:name, displayName:displayName, agreementType:agreementType}" -o json 2>$null | ConvertFrom-Json
+    if ($billingAccounts) {
+        $billingAccounts | ForEach-Object {
+            Write-Host "    Billing account: $($_.displayName)  Type: $($_.agreementType)" -ForegroundColor Gray
+        }
+        $agreementTypes = $billingAccounts | Select-Object -ExpandProperty agreementType -Unique
+        $hasCSP = $agreementTypes -contains 'MicrosoftPartnerAgreement'
+        $hasMOSP = $agreementTypes -contains 'MicrosoftOnlineServiceProgram'
+
+        if ($hasCSP) {
+            Write-Host "" -ForegroundColor Yellow
+            Write-Host "  ╔══════════════════════════════════════════════════════════════════╗" -ForegroundColor Yellow
+            Write-Host "  ║  CSP (Cloud Solution Provider) BILLING DETECTED                ║" -ForegroundColor Yellow
+            Write-Host "  ╠══════════════════════════════════════════════════════════════════╣" -ForegroundColor Yellow
+            Write-Host "  ║  CSP subscriptions must be created by your CSP partner          ║" -ForegroundColor Yellow
+            Write-Host "  ║  through the Partner Center portal. This script cannot create   ║" -ForegroundColor Yellow
+            Write-Host "  ║  subscriptions under a CSP billing arrangement.                 ║" -ForegroundColor Yellow
+            Write-Host "  ║                                                                 ║" -ForegroundColor Yellow
+            Write-Host "  ║  WHAT TO DO:                                                    ║" -ForegroundColor Yellow
+            Write-Host "  ║  1. Ask your CSP partner to create subscriptions for each user  ║" -ForegroundColor Yellow
+            Write-Host "  ║  2. Get the Subscription ID for each new subscription           ║" -ForegroundColor Yellow
+            Write-Host "  ║  3. Add them to the SubscriptionId column in your CSV/JSON      ║" -ForegroundColor Yellow
+            Write-Host "  ║  4. Skip this script and go directly to Step 2                  ║" -ForegroundColor Yellow
+            Write-Host "  ║                                                                 ║" -ForegroundColor Yellow
+            Write-Host "  ║  All subscriptions will still be under the same CSP billing     ║" -ForegroundColor Yellow
+            Write-Host "  ║  account — your partner manages the centralized billing.        ║" -ForegroundColor Yellow
+            Write-Host "  ╚══════════════════════════════════════════════════════════════════╝" -ForegroundColor Yellow
+            Write-Host ""
+            $continue = Read-Host "  Continue anyway? (y to proceed, any other key to exit)"
+            if ($continue -ne 'y') {
+                Write-Host "  Exiting. Create subscriptions via your CSP partner, then run Step 2." -ForegroundColor Cyan
+                exit 0
+            }
+        }
+
+        if ($hasMOSP) {
+            Write-Host "" -ForegroundColor Yellow
+            Write-Host "  ╔══════════════════════════════════════════════════════════════════╗" -ForegroundColor Yellow
+            Write-Host "  ║  LEGACY PAY-AS-YOU-GO (MOSP) BILLING DETECTED                  ║" -ForegroundColor Yellow
+            Write-Host "  ╠══════════════════════════════════════════════════════════════════╣" -ForegroundColor Yellow
+            Write-Host "  ║  Legacy MOSP accounts do not support programmatic subscription  ║" -ForegroundColor Yellow
+            Write-Host "  ║  creation. You have two options:                                ║" -ForegroundColor Yellow
+            Write-Host "  ║                                                                 ║" -ForegroundColor Yellow
+            Write-Host "  ║  Option 1: Upgrade to Microsoft Customer Agreement (MCA)        ║" -ForegroundColor Yellow
+            Write-Host "  ║    In Azure Portal: Cost Management > Billing > Upgrade         ║" -ForegroundColor Yellow
+            Write-Host "  ║    Then re-run this script.                                     ║" -ForegroundColor Yellow
+            Write-Host "  ║                                                                 ║" -ForegroundColor Yellow
+            Write-Host "  ║  Option 2: Create subscriptions manually                       ║" -ForegroundColor Yellow
+            Write-Host "  ║    In Azure Portal: Subscriptions > Add                         ║" -ForegroundColor Yellow
+            Write-Host "  ║    Add each Subscription ID to your CSV/JSON                    ║" -ForegroundColor Yellow
+            Write-Host "  ║    Then skip this script and go to Step 2                       ║" -ForegroundColor Yellow
+            Write-Host "  ╚══════════════════════════════════════════════════════════════════╝" -ForegroundColor Yellow
+            Write-Host ""
+            $continue = Read-Host "  Continue anyway? (y to proceed, any other key to exit)"
+            if ($continue -ne 'y') {
+                Write-Host "  Exiting. Create subscriptions manually or upgrade to MCA, then run Step 2." -ForegroundColor Cyan
+                exit 0
+            }
+        }
+
+        if (-not $hasCSP -and -not $hasMOSP) {
+            Write-Success "Billing type supported for programmatic subscription creation"
+        }
+    }
+    else {
+        Write-Warn "Could not list billing accounts (you may lack billing reader permissions)"
+    }
+}
+catch {
+    Write-Warn "Could not detect billing type: $_"
+    Write-Host "    Continuing with provided billing scope..." -ForegroundColor Gray
+}
 
 # Read users
 $users = Read-UserInput -FilePath $InputFile

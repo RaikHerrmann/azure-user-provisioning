@@ -39,6 +39,16 @@ pwsh ./New-UserSubscriptions.ps1 `
 
 > **For testing:** Skip this step entirely. Just add your existing subscription ID to the `SubscriptionId` column in the CSV file. See [Testing Without New Subscriptions](#testing-without-new-subscriptions).
 
+**Billing Type Compatibility:**
+
+| Billing Type | Step 1 (Automated) | What To Do Instead |
+|---|---|---|
+| MCA / EA / Modern PAYG | Yes | Run the script above |
+| CSP (Cloud Solution Provider) | No | Ask your CSP partner to create subscriptions, add IDs to CSV |
+| Legacy MOSP (pre-2019) | No | Upgrade to MCA in Azure Portal, or create subscriptions manually |
+
+The script **auto-detects** your billing type and shows specific guidance if your type is unsupported.
+
 ### Step 2: Deploy Everything Else
 
 Deploys all resources, RBAC, policies, cost management, and automation for each user.
