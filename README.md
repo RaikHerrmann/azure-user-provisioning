@@ -280,6 +280,40 @@ Import-Csv "./input/users.csv" | ForEach-Object {
 
 ---
 
+## Copilot Studio Licensing (Optional)
+
+The `licensing/` folder contains **independent scripts** to assign Microsoft Copilot Studio licenses to users via the Microsoft Graph API. These can be run separately from the sandbox provisioning workflow.
+
+```bash
+cd licensing
+
+# Check license status
+pwsh ./Get-LicenseStatus.ps1 -InputFile "../input/users.csv"
+
+# Preview assignment (no changes)
+pwsh ./Assign-CopilotStudioLicense.ps1 -InputFile "../input/users.csv" -WhatIf
+
+# Assign licenses
+pwsh ./Assign-CopilotStudioLicense.ps1 -InputFile "../input/users.csv"
+
+# Remove licenses
+pwsh ./Remove-CopilotStudioLicense.ps1 -InputFile "../input/users.csv"
+```
+
+The scripts reuse the same input files and Azure CLI session. No additional modules needed.
+
+| Script | Purpose |
+|--------|---------|
+| `Get-LicenseStatus.ps1` | Show tenant SKUs and per-user license status (read-only) |
+| `Assign-CopilotStudioLicense.ps1` | Assign Copilot Studio license to users from CSV/JSON |
+| `Remove-CopilotStudioLicense.ps1` | Remove Copilot Studio license from users |
+
+**Prerequisites:** Copilot Studio licenses must be purchased in the [Microsoft 365 Admin Center](https://admin.microsoft.com). The admin needs Global Admin, License Admin, or User Admin role.
+
+See the full [Copilot Studio Licensing Guide](docs/copilot-studio-licensing.md) for details.
+
+---
+
 ## Customization
 
 | Parameter | Default | Description |
@@ -335,6 +369,10 @@ azure-user-provisioning/
 │   └── runbooks/
 │       ├── Invoke-CostEnforcement.ps1  # Budget enforcement runbook
 │       └── Invoke-GracePeriodCleanup.ps1
+├── licensing/                          # Copilot Studio license management (independent)
+│   ├── Assign-CopilotStudioLicense.ps1 # Assign licenses to users
+│   ├── Remove-CopilotStudioLicense.ps1 # Remove licenses from users
+│   └── Get-LicenseStatus.ps1           # Check license status (read-only)
 ├── input/                              # User input files (edit these)
 │   ├── users.csv
 │   └── users.json
@@ -358,6 +396,7 @@ azure-user-provisioning/
 | [Functional Requirements](docs/functional-requirements.md) | All | What the solution does and the original requirements |
 | [Admin Connection Guide](docs/admin-connection-guide.md) | Beginners | Azure concepts, tool installation, authentication |
 | [Sample Walkthrough](docs/sample-walkthrough.md) | Beginners | Complete step-by-step deployment guide |
+| [Copilot Studio Licensing](docs/copilot-studio-licensing.md) | All | How to assign Copilot Studio licenses to users |
 
 ---
 
