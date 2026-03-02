@@ -4,11 +4,15 @@
 
 .DESCRIPTION
     Reads a user list, resolves Entra ID object IDs, and deploys the Bicep
-    IaC templates for each user. Supports:
+    IaC templates for each user. All users are deployed as resource groups
+    within the admin's current Azure subscription.
+
+    Supports:
       - Full batch deployment (all users at once)
       - Single-user mode (-SingleUser) for testing
       - Step-by-step mode (-Step) with pauses between phases
       - What-if preview (-WhatIf)
+      - Resource group capacity checking per subscription
 
 .PARAMETER InputFile
     Path to a CSV or JSON file containing user definitions.
@@ -25,14 +29,15 @@
 .PARAMETER GracePeriodDays
     Days before resources are deleted after enforcement (default 5).
 
+.PARAMETER MaxResourceGroupsPerSubscription
+    Maximum number of resource groups per subscription before the script
+    refuses to deploy more. Azure limit is ~980. Default: 950.
+
 .PARAMETER SingleUser
     Deploy for a single user only (by UPN). Use for testing.
 
 .PARAMETER Step
     Pause after each deployment phase for confirmation.
-
-.PARAMETER SkipSubscriptionCreation
-    Skip automatic subscription creation (use existing).
 
 .PARAMETER WhatIf
     Preview deployment changes without applying them.
@@ -70,13 +75,13 @@ param(
     [int]$GracePeriodDays = 5,
 
     [Parameter(Mandatory = $false)]
+    [int]$MaxResourceGroupsPerSubscription = 950,
+
+    [Parameter(Mandatory = $false)]
     [string]$SingleUser = '',
 
     [Parameter(Mandatory = $false)]
-    [switch]$Step,
-
-    [Parameter(Mandatory = $false)]
-    [switch]$SkipSubscriptionCreation
+    [switch]$Step
 )
 
 # ============================================================================
@@ -143,7 +148,6 @@ function Read-UserInput {
                 Email             = $_.Email
                 Department        = if ($_.Department) { $_.Department } else { '' }
                 CostCenter        = if ($_.CostCenter) { $_.CostCenter } else { '' }
-                SubscriptionId    = if ($_.SubscriptionId) { $_.SubscriptionId } else { '' }
             }
         }
     }
@@ -157,7 +161,6 @@ function Read-UserInput {
                 Email             = $_.email
                 Department        = if ($_.department) { $_.department } else { '' }
                 CostCenter        = if ($_.costCenter) { $_.costCenter } else { '' }
-                SubscriptionId    = if ($_.subscriptionId) { $_.subscriptionId } else { '' }
             }
         }
     }
@@ -324,33 +327,49 @@ try {
     # ============================================================================
     Write-Phase "5 - DEPLOYMENT" "Deploying Bicep templates for $($resolvedUsers.Count) user(s)"
 
+    # All users deploy within the current subscription as resource groups
+    $subscriptionId = $account.id
+    Write-StepInfo "Target subscription: $subscriptionId"
+
+    # Check resource group capacity
+    Write-StepInfo "Checking resource group capacity..."
+    $existingRgs = @(az group list --subscription $subscriptionId --query "[].name" -o tsv 2>$null)
+    $currentRgCount = $existingRgs.Count
+    $availableSlots = $MaxResourceGroupsPerSubscription - $currentRgCount
+    Write-StepInfo "Current RGs: $currentRgCount / $MaxResourceGroupsPerSubscription (available: $availableSlots)"
+
+    if ($availableSlots -le 0) {
+        throw "Subscription $subscriptionId has reached the maximum resource group limit ($MaxResourceGroupsPerSubscription). Cannot deploy more user environments."
+    }
+
+    if ($availableSlots -lt $resolvedUsers.Count) {
+        Write-Warn "Only $availableSlots RG slots available but $($resolvedUsers.Count) users to deploy. Will deploy up to the limit."
+    }
+
     $budgetStartDate = (Get-Date -Day 1).ToString('yyyy-MM-01')
     $results = @()
     $userIndex = 0
+    $deployedCount = 0
 
     foreach ($user in $resolvedUsers) {
         $userIndex++
         Write-Host ""
         Write-Host "  ── User $userIndex/$($resolvedUsers.Count): $($user.DisplayName) ──" -ForegroundColor Yellow
 
-        $subscriptionId = $user.SubscriptionId
-        if (-not $subscriptionId) {
-            $subscriptionId = $account.id
-            Write-StepInfo "Using current subscription: $subscriptionId"
+        # Check if this user's RG already exists (skip duplicate deployments)
+        $userRgName = "rg-$(($user.UserPrincipalName.ToLower() -replace '@','-' -replace '\.','-'))"
+        if ($existingRgs -contains $userRgName) {
+            Write-StepInfo "Resource group '$userRgName' already exists. Re-deploying (idempotent)."
         }
-        else {
-            Write-StepInfo "Using specified subscription: $subscriptionId"
-        }
-
-        # Set subscription context
-        az account set --subscription $subscriptionId 2>$null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn "Cannot access subscription $subscriptionId. Skipping user."
+        elseif ($deployedCount -ge $availableSlots) {
+            Write-Warn "Resource group capacity reached ($MaxResourceGroupsPerSubscription). Skipping $($user.UserPrincipalName)."
             $results += [PSCustomObject]@{
-                User = $user.UserPrincipalName; Status = 'FAILED'; Reason = 'Subscription not accessible'
+                User = $user.UserPrincipalName; Status = 'FAILED'; Reason = "Subscription at RG capacity ($MaxResourceGroupsPerSubscription)"
             }
             continue
         }
+
+        Write-StepInfo "Using subscription: $subscriptionId"
 
         $deploymentName = "user-env-$(($user.UserPrincipalName -replace '@','-' -replace '\.','-').ToLower())-$timestamp"
 
@@ -547,6 +566,7 @@ try {
                 Status = 'SUCCESS'
                 Reason = "RG: $rgName"
             }
+            $deployedCount++
         }
 
         Confirm-StepContinue "Process next user"

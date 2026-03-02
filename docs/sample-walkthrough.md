@@ -2,9 +2,7 @@
 
 This guide walks you through the **complete deployment process** step by step. It is written for administrators who have **beginner-level Azure experience**.
 
-The deployment is split into **two main steps**:
-1. **Step 1**: Create Subscriptions (or skip for testing)
-2. **Step 2**: Deploy Everything Else (user setup, resources, cost management, automation)
+All user environments deploy as **resource groups within a single shared subscription**. The script checks capacity and deploys Bicep templates per user.
 
 ---
 
@@ -42,12 +40,10 @@ cd azure-user-provisioning
 Edit `input/users.csv` with your users:
 
 ```csv
-UserPrincipalName,DisplayName,Email,Department,CostCenter,SubscriptionId
-alice.researcher@contoso.com,Alice Researcher,alice.researcher@contoso.com,AI Research,CC-2001,
-bob.scientist@contoso.com,Bob Scientist,bob.scientist@contoso.com,AI Research,CC-2002,
+UserPrincipalName,DisplayName,Email,Department,CostCenter
+alice.researcher@contoso.com,Alice Researcher,alice.researcher@contoso.com,AI Research,CC-2001
+bob.scientist@contoso.com,Bob Scientist,bob.scientist@contoso.com,AI Research,CC-2002
 ```
-
-> **The `SubscriptionId` column is empty** — it will be filled in during Step 1 (or you fill it manually for testing).
 
 ### Do the users exist in Entra ID?
 
@@ -68,95 +64,21 @@ This creates the accounts and saves temporary passwords to `output/new-users-*.c
 
 ---
 
-## STEP 1: Create Subscriptions
+## Set the Target Subscription
 
-> **For testing: SKIP this step.** Add your existing subscription ID to the `SubscriptionId` column in the CSV instead. Jump to [Step 2](#step-2-deploy-everything-else).
-
-### What this step does
-
-Creates one Azure subscription per user, all under the **same billing account**. This ensures centralized billing and cost visibility.
-
-### Which billing types are supported?
-
-Before finding your billing scope, check which billing type your tenant uses:
+All user environments are deployed as resource groups within your active subscription. Set it:
 
 ```bash
-az billing account list --query "[].{Name:displayName, Type:agreementType}" -o table
-```
+# List your subscriptions
+az account list --output table
 
-| Agreement Type (from command) | Billing Type | Can This Script Create Subscriptions? |
-|---|---|---|
-| `MicrosoftCustomerAgreement` | MCA | **Yes** — fully automated |
-| `EnterpriseAgreement` | EA | **Yes** — fully automated |
-| `MicrosoftCustomerAgreement` (credit card) | Modern PAYG | **Yes** — uses MCA format |
-| `MicrosoftPartnerAgreement` | CSP | **No** — see below |
-| `MicrosoftOnlineServiceProgram` | Legacy PAYG | **No** — see below |
-
-**If your type is CSP:** Your Cloud Solution Provider partner must create the subscriptions through the Partner Center portal. Ask them to create one subscription per user, get the Subscription IDs, add them to the `SubscriptionId` column in your CSV, and skip directly to [Step 2](#step-2-deploy-everything-else). All subscriptions will still be under the same CSP billing arrangement.
-
-**If your type is Legacy MOSP:** You have two options: (1) upgrade to MCA in the Azure Portal (Cost Management > Billing > Upgrade), then re-run this script, or (2) manually create subscriptions in the Azure Portal (Subscriptions > Add) and enter the IDs in your CSV.
-
-> **The script auto-detects your billing type** and shows a detailed message if it's unsupported. You don't need to memorize this table.
-
-### Find your billing scope
-
-You need your billing scope string. Run these commands to find it:
-
-```bash
-# List billing accounts
-az billing account list --query "[].{Name:name, DisplayName:displayName, Type:agreementType}" -o table
-```
-
-**For Microsoft Customer Agreement (MCA):**
-```bash
-# List billing profiles
-az billing profile list --account-name "YOUR_BILLING_ACCOUNT" -o table
-
-# List invoice sections
-az billing invoice section list --account-name "YOUR_BILLING_ACCOUNT" --profile-name "YOUR_PROFILE" -o table
-```
-
-Your billing scope is:
-```
-/providers/Microsoft.Billing/billingAccounts/ACCOUNT_ID/billingProfiles/PROFILE_ID/invoiceSections/SECTION_ID
-```
-
-**For Enterprise Agreement (EA):**
-```bash
-# The billing scope is:
-/providers/Microsoft.Billing/billingAccounts/ACCOUNT_ID/enrollmentAccounts/ENROLLMENT_ID
-```
-
-### Run subscription creation
-
-```powershell
-cd scripts
-
-# Preview first (dry run)
-pwsh ./New-UserSubscriptions.ps1 `
-    -InputFile "../input/users.csv" `
-    -BillingScope "/providers/Microsoft.Billing/billingAccounts/XXXX/billingProfiles/XXXX/invoiceSections/XXXX" `
-    -WhatIf
-
-# Create subscriptions
-pwsh ./New-UserSubscriptions.ps1 `
-    -InputFile "../input/users.csv" `
-    -BillingScope "/providers/Microsoft.Billing/billingAccounts/XXXX/billingProfiles/XXXX/invoiceSections/XXXX"
-```
-
-**What happens:**
-- A subscription named "Sandbox - Alice Researcher" is created under your billing account
-- A subscription named "Sandbox - Bob Scientist" is created under the same billing account
-- An updated input file is saved to `output/users-with-subscriptions-*.csv` with the subscription IDs filled in
-
-**Use the updated file for Step 2:**
-```powershell
-# The script tells you the output file path. Use that for the next step.
+# Set the target subscription
+az account set --subscription "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 ```
 
 ---
 
-## STEP 2: Deploy Everything Else
+## Deploy User Environments
 
 This is where the actual environment provisioning happens. It deploys **six phases** for each user: prerequisites check, input parsing, identity resolution, provider registration, Bicep deployment, and summary.
 
@@ -179,7 +101,6 @@ This is where the actual environment provisioning happens. It deploys **six phas
 ```powershell
 cd scripts
 
-# Use the file from Step 1, or your original file with SubscriptionId filled in
 pwsh ./Deploy-UserEnvironment.ps1 `
     -InputFile "../input/users.csv" `
     -Location "swedencentral" `
@@ -234,7 +155,7 @@ This deploys all users sequentially. Each user takes 5-15 minutes.
 
 ---
 
-## Understanding Each Phase of Step 2
+## Understanding Each Phase
 
 ### Phase 1: Prerequisites
 
@@ -438,8 +359,7 @@ This sets:
 
 ```powershell
 pwsh ./scripts/Remove-UserEnvironment.ps1 `
-    -UserPrincipalName "alice.researcher@contoso.com" `
-    -SubscriptionId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    -UserPrincipalName "alice.researcher@contoso.com"
 ```
 
 This removes: policies, RBAC, the resource group (and all resources inside), and deployment history.
@@ -447,31 +367,13 @@ This removes: policies, RBAC, the resource group (and all resources inside), and
 ### Remove All Users
 
 ```powershell
-$subId = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 Import-Csv "./input/users.csv" | ForEach-Object {
     pwsh ./scripts/Remove-UserEnvironment.ps1 `
         -UserPrincipalName $_.UserPrincipalName `
-        -SubscriptionId $subId `
         -Force
 }
 ```
 
 ---
 
-## Quick Reference: Testing Without New Subscriptions
 
-If you **cannot create new subscriptions** (common for testing), here's the shortcut:
-
-1. **Skip Step 1 entirely**
-2. Edit `input/users.csv` and put your existing subscription ID in the `SubscriptionId` column:
-   ```csv
-   UserPrincipalName,DisplayName,Email,Department,CostCenter,SubscriptionId
-   alice.researcher@contoso.com,Alice Researcher,alice.researcher@contoso.com,AI Research,CC-2001,xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-   bob.scientist@contoso.com,Bob Scientist,bob.scientist@contoso.com,AI Research,CC-2002,xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-   ```
-3. Run Step 2 directly:
-   ```powershell
-   pwsh ./scripts/Deploy-UserEnvironment.ps1 -InputFile "../input/users.csv" -SingleUser "alice.researcher@contoso.com" -Step
-   ```
-
-This deploys both users into the **same subscription** with separate resource groups. The RBAC scoping still ensures each user can only access their own RG.

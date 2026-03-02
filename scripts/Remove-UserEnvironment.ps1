@@ -5,15 +5,21 @@
 .DESCRIPTION
     Tears down all resources for a given user: removes resources, RBAC,
     policies, budgets, and the resource group itself.
+    All user environments reside under the admin's current subscription
+    (resource-group-per-user model).
 
 .PARAMETER UserPrincipalName
     The UPN of the user whose environment should be removed.
 
 .PARAMETER SubscriptionId
-    The subscription containing the user's environment.
+    (Optional) The subscription containing the user's environment.
+    Defaults to the current Azure CLI subscription context.
 
 .PARAMETER Force
     Skip confirmation prompts.
+
+.EXAMPLE
+    ./Remove-UserEnvironment.ps1 -UserPrincipalName "john.doe@contoso.com"
 
 .EXAMPLE
     ./Remove-UserEnvironment.ps1 -UserPrincipalName "john.doe@contoso.com" -SubscriptionId "xxxx"
@@ -24,7 +30,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$UserPrincipalName,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $false)]
     [string]$SubscriptionId,
 
     [Parameter(Mandatory = $false)]
@@ -67,9 +73,16 @@ try {
         throw "Not logged in. Run 'az login --tenant YOUR_TENANT_ID' first."
     }
 
-    az account set --subscription $SubscriptionId
-    if ($LASTEXITCODE -ne 0) {
-        throw "Cannot access subscription $SubscriptionId."
+    # Resolve subscription — use provided value or fall back to current context
+    if (-not $SubscriptionId) {
+        $SubscriptionId = $account.id
+        Write-StepInfo "Using current subscription: $SubscriptionId"
+    }
+    else {
+        az account set --subscription $SubscriptionId
+        if ($LASTEXITCODE -ne 0) {
+            throw "Cannot access subscription $SubscriptionId."
+        }
     }
 
     # Resolve user

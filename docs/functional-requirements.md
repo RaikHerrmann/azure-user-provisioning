@@ -21,10 +21,11 @@ A **tenant administrator** needs to provision isolated Azure sandbox environment
 
 ### FR-1: Per-User Isolated Environments
 
-- Each user gets their own Azure subscription (created under the same billing account)
+- All user environments deploy as resource groups within a **shared subscription**
 - Each user gets exactly **one** pre-created resource group
 - Users **cannot** create additional resource groups
-- Users **cannot** access other users' resource groups or subscriptions
+- Users **cannot** access other users' resource groups
+- The subscription supports up to 980 resource groups (Azure limit), configurable via `-MaxResourceGroupsPerSubscription`
 
 ### FR-2: Azure AI Foundry
 
@@ -62,23 +63,13 @@ A **tenant administrator** needs to provision isolated Azure sandbox environment
 - Users **cannot** delete or modify the Action Groups that send notifications
 - This is enforced through a custom RBAC role ("Sandbox Contributor") with `notActions`
 
-### FR-7: Billing Account Consolidation
+### FR-7: Shared Subscription Model
 
-- All subscriptions created for users are under the **same billing account**
-- This ensures centralized cost visibility and billing management
-- The admin specifies the billing scope during subscription creation (Step 1)
-
-**Billing Type Support:**
-
-| Billing Type | Automated Creation (Step 1) | Centralized Billing |
-|---|---|---|
-| **MCA** (Microsoft Customer Agreement) | Yes — fully automated | Yes |
-| **EA** (Enterprise Agreement) | Yes — fully automated | Yes |
-| **Modern PAYG** (post-2019 credit card) | Yes — uses MCA format | Yes |
-| **CSP** (Cloud Solution Provider) | No — partner creates via Partner Center | Yes (managed by CSP partner) |
-| **Legacy MOSP** (pre-2019 PAYG) | No — create manually or upgrade to MCA | Yes (if created under same account) |
-
-For unsupported billing types, the script detects this automatically and guides the admin to create subscriptions manually. All subscriptions are still under a single billing arrangement regardless of creation method.
+- All user environments are deployed as resource groups within a **single shared subscription**
+- The admin sets the target subscription before deployment via `az account set`
+- Resource group capacity is checked automatically before deploying new users
+- The default limit is 950 RGs per subscription (configurable via `-MaxResourceGroupsPerSubscription`)
+- This ensures centralized cost visibility and simplified management
 
 ### FR-8: Repeatable Infrastructure as Code (IaC)
 
@@ -91,7 +82,7 @@ For unsupported billing types, the script detects this automatically and guides 
 
 - The admin provides a list of users in CSV or JSON format
 - Required fields: `UserPrincipalName`, `DisplayName`, `Email`
-- Optional fields: `Department`, `CostCenter`, `SubscriptionId`
+- Optional fields: `Department`, `CostCenter`
 
 ### FR-10: Admin Flexibility
 
@@ -145,14 +136,13 @@ Azure Policy `deny` effect is evaluated during resource **creation and update** 
 
 Users with Contributor permissions can delete resource locks (`Microsoft.Authorization/locks/*`). Only removing this permission via `notActions` in the custom role provides reliable protection.
 
-### Why Per-Subscription Isolation?
+### Why Per-Resource-Group Isolation?
 
-Per-subscription isolation provides the strongest boundary:
-- Subscription-level quotas and limits are separate
-- Billing is naturally separated
-- No risk of cross-user resource access even if RBAC is misconfigured
-
-For **testing**, multiple users can share a single subscription with per-RG isolation. This works because the custom role + RG scoping still prevents cross-user access.
+All users share a single subscription, with isolation provided at the resource group level:
+- Each user gets their own resource group with dedicated RBAC scoping
+- The custom "Sandbox Contributor" role prevents users from accessing other RGs or modifying cost controls
+- Azure Policy provides an additional naming convention guardrail
+- Centralized billing and cost visibility within a single subscription
 
 ### Why Two Enforcement Paths (Webhook + Schedule)?
 

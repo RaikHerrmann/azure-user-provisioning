@@ -12,52 +12,26 @@ This solution lets a tenant administrator provision **isolated Azure sandbox env
 
 | Feature | Description |
 |---------|-------------|
-| **Isolated Environment** | Own subscription + resource group — users cannot see or touch each other's resources |
+| **Isolated Environment** | Dedicated resource group per user — users cannot see or touch each other's resources |
 | **AI Foundry** | Azure AI Hub + Project pre-deployed with storage, Key Vault, and monitoring |
 | **Tamper-Proof Cost Controls** | $15 warning, $20 hard enforcement — users **cannot** disable or modify these |
 | **Automatic Enforcement** | At $20: account goes read-only, resources stop, 5-day grace then automatic deletion |
-| **One Billing Account** | All subscriptions created under the same billing account for centralized cost visibility |
+| **Shared Subscription** | All user environments deploy as resource groups within a single subscription (up to 980 RGs) |
 
 See the full [Functional Requirements](docs/functional-requirements.md) for detailed specifications.
 
 ---
 
-## Two-Step Deployment
+## Deployment
 
-The deployment is split into two distinct steps so you can **test Step 2 independently** without creating new subscriptions.
-
-### Step 1: Create Subscriptions (Skip for Testing)
-
-Creates one Azure subscription per user under your billing account.
+All user environments are deployed as **resource groups within a single shared subscription**. The script checks RG capacity before deploying and stops if the subscription reaches its limit (default: 950).
 
 ```powershell
 cd scripts
-pwsh ./New-UserSubscriptions.ps1 `
-    -InputFile "../input/users.csv" `
-    -BillingScope "/providers/Microsoft.Billing/billingAccounts/XXXX/billingProfiles/XXXX/invoiceSections/XXXX"
-```
-
-> **For testing:** Skip this step entirely. Just add your existing subscription ID to the `SubscriptionId` column in the CSV file. See [Testing Without New Subscriptions](#testing-without-new-subscriptions).
-
-**Billing Type Compatibility:**
-
-| Billing Type | Step 1 (Automated) | What To Do Instead |
-|---|---|---|
-| MCA / EA / Modern PAYG | Yes | Run the script above |
-| CSP (Cloud Solution Provider) | No | Ask your CSP partner to create subscriptions, add IDs to CSV |
-| Legacy MOSP (pre-2019) | No | Upgrade to MCA in Azure Portal, or create subscriptions manually |
-
-The script **auto-detects** your billing type and shows specific guidance if your type is unsupported.
-
-### Step 2: Deploy Everything Else
-
-Deploys all resources, RBAC, policies, cost management, and automation for each user.
-
-```powershell
 pwsh ./Deploy-UserEnvironment.ps1 -InputFile "../input/users.csv" -Location "swedencentral"
 ```
 
-Each phase of Step 2 is independently comprehensible:
+Each phase is independently comprehensible:
 
 | Phase | What It Does | Can You Inspect It? |
 |-------|-------------|-------------------|
@@ -82,41 +56,21 @@ cd azure-user-provisioning
 # 2. Log in as tenant admin
 az login --tenant YOUR_TENANT_ID
 
-# 3. Edit the input file with your users
-#    (Add SubscriptionId for testing, or run Step 1 first for production)
+# 3. Set the target subscription
+az account set --subscription YOUR_SUBSCRIPTION_ID
 
-# 4. Preview changes (what-if — no actual deployment)
+# 4. Edit the input file with your users
+
+# 5. Preview changes (what-if — no actual deployment)
 cd scripts
 pwsh ./Deploy-UserEnvironment.ps1 -InputFile "../input/users.csv" -WhatIf
 
-# 5. Deploy one user for testing
+# 6. Deploy one user for testing
 pwsh ./Deploy-UserEnvironment.ps1 -InputFile "../input/users.csv" -SingleUser "john.doe@contoso.com" -Step
 
-# 6. Deploy all users
+# 7. Deploy all users
 pwsh ./Deploy-UserEnvironment.ps1 -InputFile "../input/users.csv" -Location "swedencentral"
 ```
-
----
-
-## Testing Without New Subscriptions
-
-If you **cannot create new subscriptions** (common during testing), skip Step 1:
-
-1. Find your existing subscription ID:
-   ```bash
-   az account list --output table
-   ```
-2. Add it to `input/users.csv`:
-   ```csv
-   UserPrincipalName,DisplayName,Email,Department,CostCenter,SubscriptionId
-   john.doe@contoso.com,John Doe,john.doe@contoso.com,Engineering,CC-1001,YOUR-EXISTING-SUB-ID
-   ```
-3. Run Step 2 directly:
-   ```powershell
-   pwsh ./Deploy-UserEnvironment.ps1 -InputFile "../input/users.csv" -SingleUser "john.doe@contoso.com" -Step
-   ```
-
-Multiple users can share a subscription — each gets their own resource group with isolated RBAC.
 
 ---
 
@@ -127,45 +81,33 @@ Multiple users can share a subscription — each gets their own resource group w
 │                        Admin Workflow                                │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
-│  Step 1 (optional)          Step 2                                  │
-│  ┌──────────────────┐       ┌──────────────────────────────────┐   │
-│  │ Create            │──────▶│ Deploy Per-User Environments     │   │
-│  │ Subscriptions     │       │ (RBAC, AI, Budget, Automation)   │   │
-│  │ (billing account) │       │                                  │   │
-│  └──────────────────┘       └──────────────────────────────────┘   │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │  Deploy-UserEnvironment.ps1                                   │  │
+│  │  Reads CSV/JSON → Resolves Entra IDs → Deploys Bicep per user │  │
+│  │  (RG capacity check → max 950 RGs per subscription)           │  │
+│  └───────────────────────────────────────────────────────────────┘  │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    Per-User Azure Environment                       │
+│        Shared Subscription (admin's current context)                │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
-│  ┌─── Subscription (under shared billing account) ───────────────┐ │
-│  │                                                               │ │
-│  │  ┌─── Resource Group (rg-{user}) ───────────────────────────┐ │ │
-│  │  │                                                          │ │ │
-│  │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │ │ │
-│  │  │  │ AI Foundry   │  │ Key Vault    │  │ Storage      │   │ │ │
-│  │  │  │ Hub + Project│  │ (RBAC auth)  │  │ Account      │   │ │ │
-│  │  │  └──────────────┘  └──────────────┘  └──────────────┘   │ │ │
-│  │  │                                                          │ │ │
-│  │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │ │ │
-│  │  │  │ App Insights │  │ Log          │  │ Automation   │   │ │ │
-│  │  │  │              │  │ Analytics    │  │ Account (MI) │   │ │ │
-│  │  │  └──────────────┘  └──────────────┘  └──────────────┘   │ │ │
-│  │  │                Protected from user modification:         │ │ │
-│  │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │ │ │
-│  │  │  │ Budget       │  │ Action       │  │ Automation   │   │ │ │
-│  │  │  │ ($15/$20)    │  │ Groups       │  │ Runbooks     │   │ │ │
-│  │  │  └──────────────┘  └──────────────┘  └──────────────┘   │ │ │
-│  │  └──────────────────────────────────────────────────────────┘ │ │
-│  │                                                               │ │
-│  │  ┌─── Subscription-Level Controls ───────────────────────────┐│ │
-│  │  │  • Custom Role: Sandbox Contributor (blocks cost infra)   ││ │
-│  │  │  • Azure Policy: Naming convention guardrail (rg-*)       ││ │
-│  │  └───────────────────────────────────────────────────────────┘│ │
-│  └───────────────────────────────────────────────────────────────┘ │
+│  ┌─ rg-john-doe ──────┐  ┌─ rg-jane-smith ────┐  ┌─ rg-bob ──────┐│
+│  │ AI Foundry Hub+Proj│  │ AI Foundry Hub+Proj│  │ AI Foundry ... ││
+│  │ Key Vault (RBAC)   │  │ Key Vault (RBAC)   │  │ Key Vault     ││
+│  │ Storage Account    │  │ Storage Account    │  │ Storage       ││
+│  │ App Insights + LA  │  │ App Insights + LA  │  │ App Insights  ││
+│  │ Automation (MI)    │  │ Automation (MI)    │  │ Automation    ││
+│  │ Budget ($15/$20)   │  │ Budget ($15/$20)   │  │ Budget        ││
+│  └────────────────────┘  └────────────────────┘  └───────────────┘│
+│                                                                     │
+│  ┌─── Subscription-Level Controls ────────────────────────────────┐│
+│  │  • Custom Role: Sandbox Contributor (blocks cost infra)        ││
+│  │  • Azure Policy: Naming convention guardrail (rg-*)            ││
+│  └────────────────────────────────────────────────────────────────┘│
+│                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 
          ┌─────────────────────────────────────────────┐
@@ -263,10 +205,7 @@ Multiple users can share a subscription — each gets their own resource group w
 | Requirement | Details |
 |-------------|---------|
 | **Subscription Owner** | To create RGs, deploy resources, manage RBAC |
-| **Billing Account access** | To create subscriptions (Step 1 only) |
-| **Entra ID read access** | To resolve user Object IDs |
 
-See [Admin Connection Guide](docs/admin-connection-guide.md) for detailed setup instructions.
 
 ---
 
@@ -274,9 +213,9 @@ See [Admin Connection Guide](docs/admin-connection-guide.md) for detailed setup 
 
 **CSV** (`input/users.csv`):
 ```csv
-UserPrincipalName,DisplayName,Email,Department,CostCenter,SubscriptionId
-john.doe@contoso.com,John Doe,john.doe@contoso.com,Engineering,CC-1001,
-jane.smith@contoso.com,Jane Smith,jane.smith@contoso.com,Data Science,CC-1002,
+UserPrincipalName,DisplayName,Email,Department,CostCenter
+john.doe@contoso.com,John Doe,john.doe@contoso.com,Engineering,CC-1001
+jane.smith@contoso.com,Jane Smith,jane.smith@contoso.com,Data Science,CC-1002
 ```
 
 **JSON** (`input/users.json`):
@@ -288,8 +227,7 @@ jane.smith@contoso.com,Jane Smith,jane.smith@contoso.com,Data Science,CC-1002,
       "displayName": "John Doe",
       "email": "john.doe@contoso.com",
       "department": "Engineering",
-      "costCenter": "CC-1001",
-      "subscriptionId": ""
+      "costCenter": "CC-1001"
     }
   ]
 }
@@ -302,7 +240,6 @@ jane.smith@contoso.com,Jane Smith,jane.smith@contoso.com,Data Science,CC-1002,
 | `Email` | Yes | Email for budget notifications |
 | `Department` | No | For tagging |
 | `CostCenter` | No | For tagging |
-| `SubscriptionId` | No | Pre-existing subscription ID. If empty, uses the admin's current subscription. |
 
 ---
 
@@ -325,7 +262,11 @@ Outputs credentials to `output/new-users-{timestamp}.csv`. Requires Global Admin
 ## Cleanup
 
 ```powershell
-# Remove one user
+# Remove one user (uses current subscription context)
+pwsh ./scripts/Remove-UserEnvironment.ps1 `
+    -UserPrincipalName "john.doe@contoso.com"
+
+# Or specify a subscription explicitly
 pwsh ./scripts/Remove-UserEnvironment.ps1 `
     -UserPrincipalName "john.doe@contoso.com" `
     -SubscriptionId "xxxx"
@@ -333,8 +274,7 @@ pwsh ./scripts/Remove-UserEnvironment.ps1 `
 # Remove all users
 Import-Csv "./input/users.csv" | ForEach-Object {
     pwsh ./scripts/Remove-UserEnvironment.ps1 `
-        -UserPrincipalName $_.UserPrincipalName `
-        -SubscriptionId "xxxx" -Force
+        -UserPrincipalName $_.UserPrincipalName -Force
 }
 ```
 
@@ -348,6 +288,7 @@ Import-Csv "./input/users.csv" | ForEach-Object {
 | `-WarningBudget` | `15` | Warning threshold (USD) |
 | `-HardLimitBudget` | `20` | Enforcement threshold (USD) |
 | `-GracePeriodDays` | `5` | Days before deletion |
+| `-MaxResourceGroupsPerSubscription` | `950` | Max RGs before refusing new deployments |
 
 ---
 
@@ -388,8 +329,7 @@ azure-user-provisioning/
 │       ├── budget.bicep                # Budgets + Action Groups (email)
 │       └── costEnforcement.bicep       # Automation Account + runbooks + schedule
 ├── scripts/
-│   ├── New-UserSubscriptions.ps1       # Step 1: Create subscriptions (billing)
-│   ├── Deploy-UserEnvironment.ps1      # Step 2: Main provisioning script
+│   ├── Deploy-UserEnvironment.ps1      # Main provisioning script
 │   ├── Remove-UserEnvironment.ps1      # Cleanup / teardown
 │   ├── New-TenantUsers.ps1            # Optional: Create Entra ID users
 │   └── runbooks/

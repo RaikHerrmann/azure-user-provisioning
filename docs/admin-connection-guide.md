@@ -25,7 +25,7 @@ You need **three things** to run this solution:
 | What | Why | How to Get It |
 |------|-----|--------------|
 | **Azure Tenant** | Your organization's identity directory | Your IT admin creates this, or use an existing one |
-| **Azure Subscription** | Where resources (and costs) live | Created in Step 1 of the deployment, or use an existing one |
+| **Azure Subscription** | Where resources (and costs) live | Use an existing one — all user environments deploy as resource groups within it |
 | **Admin Permissions** | You need Owner or Global Admin access | Ask your IT admin, or if it's your personal tenant, you already have this |
 
 ---
@@ -167,9 +167,10 @@ az account set --subscription "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 
 ### For Testing
 
-If you're *testing* the solution and don't want to create new subscriptions, use your existing subscription:
-1. Copy the subscription ID from the table above
-2. Paste it into the `SubscriptionId` column of your `input/users.csv` file
+All user environments are deployed as resource groups within the admin's active subscription. Set it with:
+```bash
+az account set --subscription "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+```
 
 ---
 
